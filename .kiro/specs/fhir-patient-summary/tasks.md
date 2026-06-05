@@ -49,7 +49,7 @@ The implementation follows the component order: data models and shared types →
     - **Property 13: FHIR bundle parsing equivalence and round-trip** — for any valid FHIR R4 Bundle JSON from either source, `FHIRClient` must produce a structurally identical `list[dict]`; patient identity fields must survive a serialize-then-parse cycle without data loss
     - **Validates: Requirements 12.1, 12.2, 12.3, 12.4**
 
-- [ ] 3. Checkpoint — Ensure all FHIRClient tests pass
+- [x] 3. Checkpoint — Ensure all FHIRClient tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 4. Implement `parse_sections()`
