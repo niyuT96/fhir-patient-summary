@@ -1,1 +1,24 @@
+# Others
 /Plan/
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# VS Code local settings
+.vscode/settings.json
+
+# Environment files
+.env
+
+# Logs
+*.log
+
+# IRIS / temporary files
+mgr/
+dur/
+iris.cpf
+iris.key
+
+# Docker local data
+*.pid

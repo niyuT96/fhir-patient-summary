@@ -1,0 +1,8 @@
+# IRIS Health App
+
+Development environment for InterSystems IRIS for Health using Docker Compose.
+
+## Start
+
+```powershell
+docker compose up -d
