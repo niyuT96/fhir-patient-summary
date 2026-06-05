@@ -1,0 +1,418 @@
+{
+  "resourceType": "Bundle",
+  "type": "transaction",
+  "entry": [
+    {
+      "resource": {
+        "resourceType": "Patient",
+        "id": "synthea-patient-001",
+        "name": [
+          {
+            "use": "official",
+            "text": "Eleanor M. Voss",
+            "family": "Voss",
+            "given": ["Eleanor", "Marie"]
+          }
+        ],
+        "gender": "female",
+        "birthDate": "1968-04-12",
+        "identifier": [
+          {
+            "type": {
+              "coding": [{"system": "http://terminology.hl7.org/CodeSystem/v2-0203", "code": "MR"}]
+            },
+            "value": "MRN-20240001"
+          }
+        ],
+        "address": [
+          {
+            "line": ["142 Maple Street"],
+            "city": "Springfield",
+            "state": "MA",
+            "postalCode": "01101"
+          }
+        ]
+      },
+      "request": {"method": "POST", "url": "Patient"}
+    },
+    {
+      "resource": {
+        "resourceType": "Condition",
+        "clinicalStatus": {
+          "coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": "active"}]
+        },
+        "code": {
+          "coding": [{"system": "http://snomed.info/sct", "code": "44054006", "display": "Diabetes mellitus type 2"}],
+          "text": "Type 2 Diabetes Mellitus"
+        },
+        "subject": {"reference": "Patient/synthea-patient-001"},
+        "onsetDateTime": "2015-03-10",
+        "recordedDate": "2015-03-10"
+      },
+      "request": {"method": "POST", "url": "Condition"}
+    },
+    {
+      "resource": {
+        "resourceType": "Condition",
+        "clinicalStatus": {
+          "coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": "active"}]
+        },
+        "code": {
+          "coding": [{"system": "http://snomed.info/sct", "code": "38341003", "display": "Hypertensive disorder"}],
+          "text": "Essential Hypertension"
+        },
+        "subject": {"reference": "Patient/synthea-patient-001"},
+        "onsetDateTime": "2012-07-22",
+        "recordedDate": "2012-07-22"
+      },
+      "request": {"method": "POST", "url": "Condition"}
+    },
+    {
+      "resource": {
+        "resourceType": "Condition",
+        "clinicalStatus": {
+          "coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": "active"}]
+        },
+        "code": {
+          "coding": [{"system": "http://snomed.info/sct", "code": "195967001", "display": "Asthma"}],
+          "text": "Moderate Persistent Asthma"
+        },
+        "subject": {"reference": "Patient/synthea-patient-001"},
+        "onsetDateTime": "2003-11-05",
+        "recordedDate": "2003-11-05"
+      },
+      "request": {"method": "POST", "url": "Condition"}
+    },
+    {
+      "resource": {
+        "resourceType": "MedicationRequest",
+        "status": "active",
+        "intent": "order",
+        "medicationCodeableConcept": {
+          "coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "860975", "display": "Metformin 500 MG Oral Tablet"}],
+          "text": "Metformin 500mg"
+        },
+        "subject": {"reference": "Patient/synthea-patient-001"},
+        "authoredOn": "2015-03-10",
+        "dosageInstruction": [{"text": "500 mg by mouth twice daily with meals"}]
+      },
+      "request": {"method": "POST", "url": "MedicationRequest"}
+    },
+    {
+      "resource": {
+        "resourceType": "MedicationRequest",
+        "status": "active",
+        "intent": "order",
+        "medicationCodeableConcept": {
+          "coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "29046", "display": "Lisinopril 10 MG Oral Tablet"}],
+          "text": "Lisinopril 10mg"
+        },
+        "subject": {"reference": "Patient/synthea-patient-001"},
+        "authoredOn": "2012-07-22",
+        "dosageInstruction": [{"text": "10 mg by mouth once daily"}]
+      },
+      "request": {"method": "POST", "url": "MedicationRequest"}
+    },
+    {
+      "resource": {
+        "resourceType": "MedicationRequest",
+        "status": "active",
+        "intent": "order",
+        "medicationCodeableConcept": {
+          "coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "1049502", "display": "Albuterol 0.083 MG/ML Inhalation Solution"}],
+          "text": "Albuterol Inhaler"
+        },
+        "subject": {"reference": "Patient/synthea-patient-001"},
+        "authoredOn": "2003-11-05",
+        "dosageInstruction": [{"text": "2 puffs inhaled every 4-6 hours as needed for shortness of breath"}]
+      },
+      "request": {"method": "POST", "url": "MedicationRequest"}
+    },
+    {
+      "resource": {
+        "resourceType": "MedicationRequest",
+        "status": "active",
+        "intent": "order",
+        "medicationCodeableConcept": {
+          "coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "197361", "display": "Atorvastatin 40 MG Oral Tablet"}],
+          "text": "Atorvastatin 40mg"
+        },
+        "subject": {"reference": "Patient/synthea-patient-001"},
+        "authoredOn": "2016-02-14",
+        "dosageInstruction": [{"text": "40 mg by mouth once daily at bedtime"}]
+      },
+      "request": {"method": "POST", "url": "MedicationRequest"}
+    },
+    {
+      "resource": {
+        "resourceType": "MedicationRequest",
+        "status": "active",
+        "intent": "order",
+        "medicationCodeableConcept": {
+          "coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "308136", "display": "Aspirin 81 MG Oral Tablet"}],
+          "text": "Aspirin 81mg"
+        },
+        "subject": {"reference": "Patient/synthea-patient-001"},
+        "authoredOn": "2017-08-01",
+        "dosageInstruction": [{"text": "81 mg by mouth once daily"}]
+      },
+      "request": {"method": "POST", "url": "MedicationRequest"}
+    },
+    {
+      "resource": {
+        "resourceType": "AllergyIntolerance",
+        "clinicalStatus": {
+          "coding": [{"system": "http://terminology.hl7.org/CodeSystem/allergyintolerance-clinical", "code": "active"}]
+        },
+        "code": {
+          "coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "7980", "display": "Penicillin"}],
+          "text": "Penicillin"
+        },
+        "patient": {"reference": "Patient/synthea-patient-001"},
+        "criticality": "high",
+        "reaction": [
+          {
+            "manifestation": [
+              {"coding": [{"system": "http://snomed.info/sct", "code": "39579001"}], "text": "Anaphylaxis"}
+            ],
+            "severity": "severe"
+          }
+        ]
+      },
+      "request": {"method": "POST", "url": "AllergyIntolerance"}
+    },
+    {
+      "resource": {
+        "resourceType": "Observation",
+        "status": "final",
+        "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "laboratory"}]}],
+        "code": {"coding": [{"system": "http://loinc.org", "code": "4548-4"}], "text": "Hemoglobin A1c/Hemoglobin.total in Blood"},
+        "subject": {"reference": "Patient/synthea-patient-001"},
+        "effectiveDateTime": "2026-05-15T09:30:00Z",
+        "valueQuantity": {"value": 7.8, "unit": "%", "system": "http://unitsofmeasure.org", "code": "%"}
+      },
+      "request": {"method": "POST", "url": "Observation"}
+    },
+    {
+      "resource": {
+        "resourceType": "Observation",
+        "status": "final",
+        "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs"}]}],
+        "code": {"coding": [{"system": "http://loinc.org", "code": "55284-4"}], "text": "Blood Pressure"},
+        "subject": {"reference": "Patient/synthea-patient-001"},
+        "effectiveDateTime": "2026-05-15T09:35:00Z",
+        "valueQuantity": {"value": 148, "unit": "mmHg", "system": "http://unitsofmeasure.org", "code": "mm[Hg]"}
+      },
+      "request": {"method": "POST", "url": "Observation"}
+    },
+    {
+      "resource": {
+        "resourceType": "Observation",
+        "status": "final",
+        "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "laboratory"}]}],
+        "code": {"coding": [{"system": "http://loinc.org", "code": "2345-7"}], "text": "Glucose [Mass/volume] in Serum or Plasma"},
+        "subject": {"reference": "Patient/synthea-patient-001"},
+        "effectiveDateTime": "2026-05-15T09:30:00Z",
+        "valueQuantity": {"value": 182, "unit": "mg/dL", "system": "http://unitsofmeasure.org", "code": "mg/dL"}
+      },
+      "request": {"method": "POST", "url": "Observation"}
+    },
+    {
+      "resource": {
+        "resourceType": "Observation",
+        "status": "final",
+        "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "laboratory"}]}],
+        "code": {"coding": [{"system": "http://loinc.org", "code": "2160-0"}], "text": "Creatinine [Mass/volume] in Serum or Plasma"},
+        "subject": {"reference": "Patient/synthea-patient-001"},
+        "effectiveDateTime": "2026-05-15T09:30:00Z",
+        "valueQuantity": {"value": 1.1, "unit": "mg/dL", "system": "http://unitsofmeasure.org", "code": "mg/dL"}
+      },
+      "request": {"method": "POST", "url": "Observation"}
+    },
+    {
+      "resource": {
+        "resourceType": "Observation",
+        "status": "final",
+        "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "laboratory"}]}],
+        "code": {"coding": [{"system": "http://loinc.org", "code": "2093-3"}], "text": "Cholesterol [Mass/volume] in Serum or Plasma"},
+        "subject": {"reference": "Patient/synthea-patient-001"},
+        "effectiveDateTime": "2026-03-10T10:00:00Z",
+        "valueQuantity": {"value": 198, "unit": "mg/dL", "system": "http://unitsofmeasure.org", "code": "mg/dL"}
+      },
+      "request": {"method": "POST", "url": "Observation"}
+    },
+    {
+      "resource": {
+        "resourceType": "Observation",
+        "status": "final",
+        "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs"}]}],
+        "code": {"coding": [{"system": "http://loinc.org", "code": "8867-4"}], "text": "Heart rate"},
+        "subject": {"reference": "Patient/synthea-patient-001"},
+        "effectiveDateTime": "2026-05-15T09:35:00Z",
+        "valueQuantity": {"value": 82, "unit": "beats/min", "system": "http://unitsofmeasure.org", "code": "/min"}
+      },
+      "request": {"method": "POST", "url": "Observation"}
+    },
+    {
+      "resource": {
+        "resourceType": "Observation",
+        "status": "final",
+        "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs"}]}],
+        "code": {"coding": [{"system": "http://loinc.org", "code": "8310-5"}], "text": "Body temperature"},
+        "subject": {"reference": "Patient/synthea-patient-001"},
+        "effectiveDateTime": "2026-05-15T09:35:00Z",
+        "valueQuantity": {"value": 37.1, "unit": "Cel", "system": "http://unitsofmeasure.org", "code": "Cel"}
+      },
+      "request": {"method": "POST", "url": "Observation"}
+    },
+    {
+      "resource": {
+        "resourceType": "Observation",
+        "status": "final",
+        "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs"}]}],
+        "code": {"coding": [{"system": "http://loinc.org", "code": "59408-5"}], "text": "Oxygen saturation in Arterial blood by Pulse oximetry"},
+        "subject": {"reference": "Patient/synthea-patient-001"},
+        "effectiveDateTime": "2026-05-15T09:35:00Z",
+        "valueQuantity": {"value": 97, "unit": "%", "system": "http://unitsofmeasure.org", "code": "%"}
+      },
+      "request": {"method": "POST", "url": "Observation"}
+    },
+    {
+      "resource": {
+        "resourceType": "Observation",
+        "status": "final",
+        "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "laboratory"}]}],
+        "code": {"coding": [{"system": "http://loinc.org", "code": "718-7"}], "text": "Hemoglobin [Mass/volume] in Blood"},
+        "subject": {"reference": "Patient/synthea-patient-001"},
+        "effectiveDateTime": "2026-03-10T10:00:00Z",
+        "valueQuantity": {"value": 12.4, "unit": "g/dL", "system": "http://unitsofmeasure.org", "code": "g/dL"}
+      },
+      "request": {"method": "POST", "url": "Observation"}
+    },
+    {
+      "resource": {
+        "resourceType": "Observation",
+        "status": "final",
+        "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "laboratory"}]}],
+        "code": {"coding": [{"system": "http://loinc.org", "code": "2823-3"}], "text": "Potassium [Moles/volume] in Serum or Plasma"},
+        "subject": {"reference": "Patient/synthea-patient-001"},
+        "effectiveDateTime": "2026-03-10T10:00:00Z",
+        "valueQuantity": {"value": 4.2, "unit": "mEq/L", "system": "http://unitsofmeasure.org", "code": "meq/L"}
+      },
+      "request": {"method": "POST", "url": "Observation"}
+    },
+    {
+      "resource": {
+        "resourceType": "Observation",
+        "status": "final",
+        "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs"}]}],
+        "code": {"coding": [{"system": "http://loinc.org", "code": "39156-5"}], "text": "Body mass index (BMI) [Ratio]"},
+        "subject": {"reference": "Patient/synthea-patient-001"},
+        "effectiveDateTime": "2026-01-20T08:00:00Z",
+        "valueQuantity": {"value": 29.8, "unit": "kg/m2", "system": "http://unitsofmeasure.org", "code": "kg/m2"}
+      },
+      "request": {"method": "POST", "url": "Observation"}
+    },
+    {
+      "resource": {
+        "resourceType": "Encounter",
+        "status": "finished",
+        "class": {"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode", "code": "AMB"},
+        "type": [{"coding": [{"system": "http://snomed.info/sct", "code": "11429006"}], "text": "Primary care follow-up visit"}],
+        "subject": {"reference": "Patient/synthea-patient-001"},
+        "period": {"start": "2026-05-15T09:00:00Z", "end": "2026-05-15T10:00:00Z"},
+        "reasonCode": [{"coding": [{"system": "http://snomed.info/sct", "code": "44054006"}], "text": "Diabetes management and medication review"}]
+      },
+      "request": {"method": "POST", "url": "Encounter"}
+    },
+    {
+      "resource": {
+        "resourceType": "Encounter",
+        "status": "finished",
+        "class": {"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode", "code": "EMER"},
+        "type": [{"coding": [{"system": "http://snomed.info/sct", "code": "50849002"}], "text": "Emergency department visit"}],
+        "subject": {"reference": "Patient/synthea-patient-001"},
+        "period": {"start": "2026-02-03T14:30:00Z", "end": "2026-02-03T18:45:00Z"},
+        "reasonCode": [{"coding": [{"system": "http://snomed.info/sct", "code": "230690007"}], "text": "Acute exacerbation of asthma"}]
+      },
+      "request": {"method": "POST", "url": "Encounter"}
+    },
+    {
+      "resource": {
+        "resourceType": "Encounter",
+        "status": "finished",
+        "class": {"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode", "code": "AMB"},
+        "type": [{"coding": [{"system": "http://snomed.info/sct", "code": "11429006"}], "text": "Cardiology consultation"}],
+        "subject": {"reference": "Patient/synthea-patient-001"},
+        "period": {"start": "2026-01-10T11:00:00Z", "end": "2026-01-10T12:00:00Z"},
+        "reasonCode": [{"coding": [{"system": "http://snomed.info/sct", "code": "38341003"}], "text": "Hypertension evaluation and medication adjustment"}]
+      },
+      "request": {"method": "POST", "url": "Encounter"}
+    },
+    {
+      "resource": {
+        "resourceType": "CarePlan",
+        "status": "active",
+        "intent": "plan",
+        "title": "Chronic Disease Management Plan",
+        "subject": {"reference": "Patient/synthea-patient-001"},
+        "period": {"start": "2026-01-01", "end": "2026-12-31"},
+        "goal": [
+          {"reference": "Goal/goal-hba1c"},
+          {"reference": "Goal/goal-bp"}
+        ],
+        "activity": [
+          {
+            "detail": {
+              "status": "in-progress",
+              "description": "Monitor HbA1c every 3 months; target < 7.0%"
+            }
+          },
+          {
+            "detail": {
+              "status": "in-progress",
+              "description": "Check fasting glucose at home twice weekly and log results"
+            }
+          },
+          {
+            "detail": {
+              "status": "in-progress",
+              "description": "Blood pressure self-monitoring daily; target < 130/80 mmHg"
+            }
+          },
+          {
+            "detail": {
+              "status": "in-progress",
+              "description": "Follow DASH diet and reduce sodium intake to < 1500 mg/day"
+            }
+          },
+          {
+            "detail": {
+              "status": "in-progress",
+              "description": "30 minutes of moderate aerobic exercise at least 5 days per week"
+            }
+          },
+          {
+            "detail": {
+              "status": "in-progress",
+              "description": "Annual ophthalmology exam for diabetic retinopathy screening"
+            }
+          },
+          {
+            "detail": {
+              "status": "in-progress",
+              "description": "Podiatry referral for annual diabetic foot exam"
+            }
+          },
+          {
+            "detail": {
+              "status": "in-progress",
+              "description": "Pulmonology follow-up every 6 months for asthma control assessment"
+            }
+          }
+        ]
+      },
+      "request": {"method": "POST", "url": "CarePlan"}
+    }
+  ]
+}

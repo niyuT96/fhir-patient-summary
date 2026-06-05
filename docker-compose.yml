@@ -1,15 +1,36 @@
 services:
   iris:
     image: intersystems/irishealth-community:latest-em
-    container_name: fhir-patient-summary
+    container_name: fhir-iris
     ports:
       - "52773:52773"
       - "1972:1972"
     volumes:
       - irishealth-durable:/dur
-      - ./src:/irisdev/app/src
     environment:
       ISC_DATA_DIRECTORY: /dur/iconfig
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:52773/fhir/r4/metadata"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+  app:
+    build: .
+    container_name: fhir-app
+    ports:
+      - "7860:7860"
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      IRIS_PASSWORD: ${IRIS_PASSWORD}
+      IRIS_BASE_URL: http://iris:52773/fhir/r4
+      IRIS_USERNAME: superuser
+    depends_on:
+      iris:
+        condition: service_healthy
+    # If IRIS is unhealthy the app still starts — it falls back to local bundle
+    # automatically because FHIRClient.is_available() will return False.
 
 volumes:
   irishealth-durable:

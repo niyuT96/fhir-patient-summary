@@ -22,3 +22,10 @@ iris.key
 
 # Docker local data
 *.pid
+
+# FHIR loader state (server-assigned IDs, never commit)
+data/loaded-patient-ids.json
+
+# Python cache
+__pycache__/
+.pytest_cache/
