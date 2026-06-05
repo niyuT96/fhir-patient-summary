@@ -112,7 +112,7 @@ The implementation follows the component order: data models and shared types →
     - Return `SummaryResult` with `error="Unsupported role: {role}"` and empty section fields immediately (without calling LLM) for any role other than `"ED Doctor"` or `"Care Manager"`
     - _Requirements: 2.3, 2.4, 4.1, 4.2, 4.3, 6.6, 6.7_
 
-  - [-] 7.2 Implement FHIR resource fetching with graceful degradation
+  - [ ] 7.2 Implement FHIR resource fetching with graceful degradation
     - Fetch all seven resource types sequentially using the query parameters defined in the FHIR Fetch Algorithm (design §Algorithmic Pseudocode)
     - On `FHIRClientError` or `FHIRUnavailableError` for non-Patient resource types: log a warning with the resource type and error message, set that field to `[]`, and continue fetching remaining types; preserve all previously fetched results
     - If the Patient fetch itself raises an error, return `SummaryResult` with `error="Failed to fetch Patient {id}: {error_message}"` and do not call the LLM
