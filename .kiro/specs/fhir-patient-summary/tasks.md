@@ -18,13 +18,13 @@ The implementation follows the component order: data models and shared types →
   - Add `.env` to `.gitignore`
   - _Requirements: 10.5, 10.6, 11.2, 11.3_
 
-- [-] 2. Implement FHIRClient
-  - [-] 2.1 Implement `FHIRClient.__init__()` and `is_available()`
+- [x] 2. Implement FHIRClient
+  - [x] 2.1 Implement `FHIRClient.__init__()` and `is_available()`
     - Accept `base_url`, `username`, `password`, and `fallback_path` constructor parameters
     - Implement `is_available()`: GET `/fhir/r4/metadata` with 5-second timeout; return `True` on HTTP 200, `False` on any other outcome including exceptions
     - _Requirements: 2.2_
 
-  - [-] 2.2 Implement `FHIRClient.get_resource()` for live server
+  - [x] 2.2 Implement `FHIRClient.get_resource()` for live server
     - Validate `resource_type` against the seven allowed types; raise `ValueError` immediately for any other value without making a network request
     - Build the FHIR R4 query URL and merge caller-supplied `params` with any type-specific defaults (Observation: `_sort=-date&_count=20`; Encounter: `_sort=-date&_count=5`; Condition: `clinical-status=active`; MedicationRequest: `status=active`; CarePlan: `status=active`)
     - Send authenticated HTTP GET with HTTP Basic auth; raise `FHIRClientError` on HTTP 4xx/5xx; raise `FHIRUnavailableError` on connection timeout (10-second timeout) or connection refusal
@@ -39,7 +39,7 @@ The implementation follows the component order: data models and shared types →
     - **Property 2: HTTP error codes raise FHIRClientError** — for any HTTP status code in 400–599, `get_resource()` must raise `FHIRClientError` and must not return a resource list
     - **Validates: Requirements 1.3**
 
-  - [-] 2.5 Implement `FHIRClient` fallback bundle loading
+  - [x] 2.5 Implement `FHIRClient` fallback bundle loading
     - Implement local bundle parsing: read `data/sample-patient-bundle.json`, parse JSON, extract `entry[].resource` using the same extraction logic as the live server path (silently skip entries without `resource` key)
     - Raise `RuntimeError` with path and parse failure reason if the file is missing or contains invalid JSON
     - Implement `list_patients()`: return list of Patient resources from the live server (GET `/fhir/r4/Patient`) or from the fallback bundle if the server is unavailable

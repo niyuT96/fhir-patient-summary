@@ -1,6 +1,6 @@
 # Others
 /Plan/
-
+*.pyc
 # Windows
 Thumbs.db
 Desktop.ini
