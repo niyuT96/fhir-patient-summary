@@ -329,8 +329,9 @@ class TestLoadFallbackBundle:
 
         try:
             client = make_client(fallback_path=tmp_path)
-            with pytest.raises(RuntimeError, match=tmp_path):
+            with pytest.raises(RuntimeError) as exc_info:
                 client._load_fallback_bundle()
+            assert tmp_path in str(exc_info.value)
         finally:
             os.unlink(tmp_path)
 
