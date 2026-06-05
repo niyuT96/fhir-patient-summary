@@ -227,8 +227,10 @@ class SummaryAgent:
         llm_client,  # openai.OpenAI instance — typed loosely to avoid hard dependency
     ) -> None:
         self._fhir = fhir_client
+        self._fhir_client = fhir_client  # alias for test compatibility
         self._extractor = extractor
         self._llm = llm_client
+        self._llm_client = llm_client  # alias for test compatibility
 
     def generate_summary(self, patient_id: str, role: str) -> SummaryResult:
         """Generate a role-specific clinical summary for *patient_id*.

@@ -173,18 +173,10 @@ class TestDataSourceDetermination:
         assert result.data_source == "fhir_server"
 
     def test_data_source_local_fallback_when_unavailable(self):
-        """When is_available() is False, the fallback path is taken.
-
-        The fallback fetch stub raises NotImplementedError (task 7.2 work),
-        so we verify that:
-        1. is_available() was called (data-source determination happened), AND
-        2. the NotImplementedError comes from _fetch_resources (not a role error),
-           confirming generate_summary correctly branched into the fallback path.
-        """
+        """When is_available() is False, data_source must be 'local_fallback'."""
         agent, fhir, _, _ = _make_agent(is_available=False)
-        # The fallback _fetch_resources raises NotImplementedError (task 7.2 stub)
-        with pytest.raises(NotImplementedError):
-            agent.generate_summary("p1", "Care Manager")
+        result = agent.generate_summary("p1", "Care Manager")
+        assert result.data_source == "local_fallback"
         # is_available must have been consulted to reach this branch
         fhir.is_available.assert_called_once()
 
