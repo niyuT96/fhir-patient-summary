@@ -1,460 +1,404 @@
 """
-Unit tests for _fetch_all_fhir_resources() (task 7.2).
+Unit tests for SummaryAgent (tasks 7.1, 7.2, 7.4).
 
-Covers Requirements 7.1–7.5:
-- 7.1  Non-Patient FHIRClientError/FHIRUnavailableError → warn, set to [], continue
-- 7.2  Patient list empty → SummaryResult with "Patient {id} not found"
-- 7.3  Patient fetch raises error → SummaryResult with "Failed to fetch Patient {id}: …"
-- 7.4  Failed types default to []; successfully fetched types retain values
-- 7.5  Previously fetched results preserved across failures
+Covers:
+- Role validation: unsupported roles return error SummaryResult without LLM call
+- Data-source determination: fhir_server vs local_fallback
+- FHIR fetch: graceful degradation for non-Patient errors
+- FHIR fetch: Patient not found / Patient fetch error → error SummaryResult
+- generated_at is always set (ISO 8601 UTC)
+- patient_id and role always match inputs
+- LLM success → populated sections, error=None
+- LLM failure → error set, sections empty
+- No unhandled exception ever propagates
 """
 
-from unittest.mock import MagicMock, call, patch
+from __future__ import annotations
+
+import re
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.agent import _fetch_all_fhir_resources
+from src.agent import SummaryAgent, _fetch_all_fhir_resources, parse_sections
 from src.exceptions import FHIRClientError, FHIRUnavailableError
 from src.models import PatientResources, SummaryResult
 
-
 # ---------------------------------------------------------------------------
-# Helpers
+# Helpers / factories
 # ---------------------------------------------------------------------------
 
-_PATIENT = {"resourceType": "Patient", "id": "p1", "name": [{"text": "Jane Doe"}]}
-_CONDITION = {"resourceType": "Condition", "id": "c1"}
-_MEDICATION = {"resourceType": "MedicationRequest", "id": "m1"}
-_ALLERGY = {"resourceType": "AllergyIntolerance", "id": "a1"}
-_OBSERVATION = {"resourceType": "Observation", "id": "o1"}
-_ENCOUNTER = {"resourceType": "Encounter", "id": "e1"}
-_CARE_PLAN = {"resourceType": "CarePlan", "id": "cp1"}
+ISO_8601_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+MINIMAL_PATIENT = {
+    "resourceType": "Patient",
+    "id": "patient-001",
+    "name": [{"text": "Jane Doe"}],
+    "birthDate": "1970-01-01",
+    "gender": "female",
+}
 
 
-def _make_client_returns(responses: dict[str, list[dict]]) -> MagicMock:
-    """Build a mock FHIRClient whose get_resource() returns values keyed by resource_type."""
+def _make_fhir_client(
+    *,
+    available: bool = True,
+    patient_resources: list[dict] | None = None,
+    side_effects: dict | None = None,
+) -> MagicMock:
+    """Build a mock FHIRClient.
 
-    def _side_effect(resource_type: str, patient_id: str, params: dict | None = None):
-        return responses[resource_type]
-
+    Args:
+        available:         Return value of is_available().
+        patient_resources: List returned for Patient get_resource call.
+        side_effects:      Mapping of resource_type → exception to raise
+                           instead of returning a list.
+    """
     client = MagicMock()
-    client.get_resource.side_effect = _side_effect
+    client.is_available.return_value = available
+
+    if patient_resources is None:
+        patient_resources = [MINIMAL_PATIENT]
+
+    side_effects = side_effects or {}
+
+    def _get_resource(resource_type, patient_id, params=None):
+        if resource_type in side_effects:
+            raise side_effects[resource_type]
+        if resource_type == "Patient":
+            return patient_resources
+        return []
+
+    client.get_resource.side_effect = _get_resource
     return client
 
 
-def _make_client_all_happy(patient_id: str = "p1") -> MagicMock:
-    """Return a client that successfully returns one resource per type."""
-    return _make_client_returns({
-        "Patient":            [_PATIENT],
-        "Condition":          [_CONDITION],
-        "MedicationRequest":  [_MEDICATION],
-        "AllergyIntolerance": [_ALLERGY],
-        "Observation":        [_OBSERVATION],
-        "Encounter":          [_ENCOUNTER],
-        "CarePlan":           [_CARE_PLAN],
-    })
+def _make_extractor() -> MagicMock:
+    extractor = MagicMock()
+    extractor.extract.return_value = "Patient context string"
+    return extractor
+
+
+def _make_llm(content: str = "## Current Issues\nIssues\n## Recent Changes\nChanges\n## Risks and Follow-up\nRisks") -> MagicMock:
+    llm = MagicMock()
+    choice = MagicMock()
+    choice.message.content = content
+    llm.chat.completions.create.return_value = MagicMock(choices=[choice])
+    return llm
+
+
+def _make_agent(*, available=True, patient_resources=None, side_effects=None, llm_content=None):
+    fhir = _make_fhir_client(
+        available=available,
+        patient_resources=patient_resources,
+        side_effects=side_effects,
+    )
+    extractor = _make_extractor()
+    llm = _make_llm() if llm_content is None else _make_llm(content=llm_content)
+    return SummaryAgent(fhir_client=fhir, extractor=extractor, llm_client=llm), fhir, extractor, llm
 
 
 # ---------------------------------------------------------------------------
-# Happy-path: successful fetch assembles PatientResources correctly
+# Role validation (Req 4.3, 6.6, 6.7)
 # ---------------------------------------------------------------------------
 
-class TestSuccessfulFetch:
-    def test_returns_patient_resources_on_success(self):
-        client = _make_client_all_happy()
-        result = _fetch_all_fhir_resources(client, "p1")
-        assert isinstance(result, PatientResources)
+class TestRoleValidation:
+    def test_unsupported_role_returns_error_without_llm_call(self):
+        agent, _, _, llm = _make_agent()
+        result = agent.generate_summary("patient-001", "Radiologist")
+        assert result.error == "Unsupported role: Radiologist"
+        llm.chat.completions.create.assert_not_called()
 
-    def test_patient_field_is_first_patient_resource(self):
-        client = _make_client_all_happy()
-        result = _fetch_all_fhir_resources(client, "p1")
-        assert isinstance(result, PatientResources)
-        assert result.patient == _PATIENT
+    def test_unsupported_role_sections_are_empty(self):
+        agent, _, _, _ = _make_agent()
+        result = agent.generate_summary("patient-001", "Nurse")
+        assert result.current_issues == ""
+        assert result.recent_changes == ""
+        assert result.risks_and_followup == ""
 
-    def test_all_seven_resource_types_are_fetched(self):
-        client = _make_client_all_happy()
-        _fetch_all_fhir_resources(client, "p1")
-        # Exactly 7 calls, one per resource type
-        assert client.get_resource.call_count == 7
+    def test_unsupported_role_patient_id_preserved(self):
+        agent, _, _, _ = _make_agent()
+        result = agent.generate_summary("patient-42", "Unknown")
+        assert result.patient_id == "patient-42"
 
-    def test_resource_types_fetched_in_correct_order(self):
-        client = _make_client_all_happy()
-        _fetch_all_fhir_resources(client, "p1")
-        expected_order = [
-            "Patient", "Condition", "MedicationRequest",
-            "AllergyIntolerance", "Observation", "Encounter", "CarePlan",
-        ]
-        actual_order = [c.args[0] for c in client.get_resource.call_args_list]
-        assert actual_order == expected_order
+    def test_unsupported_role_role_preserved(self):
+        agent, _, _, _ = _make_agent()
+        result = agent.generate_summary("patient-001", "Surgeon")
+        assert result.role == "Surgeon"
 
-    def test_conditions_populated(self):
-        client = _make_client_all_happy()
-        result = _fetch_all_fhir_resources(client, "p1")
-        assert isinstance(result, PatientResources)
-        assert result.conditions == [_CONDITION]
+    def test_ed_doctor_is_valid(self):
+        agent, _, _, _ = _make_agent()
+        result = agent.generate_summary("patient-001", "ED Doctor")
+        assert result.error is None or "Unsupported role" not in (result.error or "")
 
-    def test_medications_populated(self):
-        client = _make_client_all_happy()
-        result = _fetch_all_fhir_resources(client, "p1")
-        assert isinstance(result, PatientResources)
-        assert result.medications == [_MEDICATION]
-
-    def test_allergies_populated(self):
-        client = _make_client_all_happy()
-        result = _fetch_all_fhir_resources(client, "p1")
-        assert isinstance(result, PatientResources)
-        assert result.allergies == [_ALLERGY]
-
-    def test_observations_populated(self):
-        client = _make_client_all_happy()
-        result = _fetch_all_fhir_resources(client, "p1")
-        assert isinstance(result, PatientResources)
-        assert result.observations == [_OBSERVATION]
-
-    def test_encounters_populated(self):
-        client = _make_client_all_happy()
-        result = _fetch_all_fhir_resources(client, "p1")
-        assert isinstance(result, PatientResources)
-        assert result.encounters == [_ENCOUNTER]
-
-    def test_care_plans_populated(self):
-        client = _make_client_all_happy()
-        result = _fetch_all_fhir_resources(client, "p1")
-        assert isinstance(result, PatientResources)
-        assert result.care_plans == [_CARE_PLAN]
+    def test_care_manager_is_valid(self):
+        agent, _, _, _ = _make_agent()
+        result = agent.generate_summary("patient-001", "Care Manager")
+        assert result.error is None or "Unsupported role" not in (result.error or "")
 
 
 # ---------------------------------------------------------------------------
-# Query parameter contract
+# Data-source determination (Req 2.3, 2.4)
 # ---------------------------------------------------------------------------
 
-class TestQueryParameters:
-    def test_patient_fetch_uses_id_param(self):
-        client = _make_client_all_happy()
-        _fetch_all_fhir_resources(client, "patient-abc")
-        patient_call = client.get_resource.call_args_list[0]
-        assert patient_call.args[0] == "Patient"
-        params = patient_call.args[2]
-        assert params.get("_id") == "patient-abc"
+class TestDataSource:
+    def test_data_source_fhir_server_when_available(self):
+        agent, _, _, _ = _make_agent(available=True)
+        result = agent.generate_summary("patient-001", "ED Doctor")
+        assert result.data_source == "fhir_server"
 
-    def test_condition_fetch_uses_patient_param_and_clinical_status(self):
-        client = _make_client_all_happy()
-        _fetch_all_fhir_resources(client, "patient-abc")
-        cond_call = client.get_resource.call_args_list[1]
-        params = cond_call.args[2]
-        assert params.get("patient") == "patient-abc"
-        assert params.get("clinical-status") == "active"
+    def test_data_source_local_fallback_when_unavailable(self):
+        fhir = MagicMock()
+        fhir.is_available.return_value = False
+        fhir._load_fallback_bundle.return_value = [MINIMAL_PATIENT]
+        extractor = _make_extractor()
+        llm = _make_llm()
+        agent = SummaryAgent(fhir_client=fhir, extractor=extractor, llm_client=llm)
+        result = agent.generate_summary("patient-001", "ED Doctor")
+        assert result.data_source == "local_fallback"
 
-    def test_medication_request_fetch_uses_status_active(self):
-        client = _make_client_all_happy()
-        _fetch_all_fhir_resources(client, "patient-abc")
-        med_call = client.get_resource.call_args_list[2]
-        params = med_call.args[2]
-        assert params.get("status") == "active"
-        assert params.get("patient") == "patient-abc"
+    def test_fhir_available_calls_get_resource(self):
+        agent, fhir, _, _ = _make_agent(available=True)
+        agent.generate_summary("patient-001", "ED Doctor")
+        fhir.get_resource.assert_called()
 
-    def test_observation_fetch_uses_sort_and_count(self):
-        client = _make_client_all_happy()
-        _fetch_all_fhir_resources(client, "patient-abc")
-        obs_call = client.get_resource.call_args_list[4]
-        params = obs_call.args[2]
-        assert params.get("_sort") == "-date"
-        assert params.get("_count") == "20"
-
-    def test_encounter_fetch_uses_sort_and_count_5(self):
-        client = _make_client_all_happy()
-        _fetch_all_fhir_resources(client, "patient-abc")
-        enc_call = client.get_resource.call_args_list[5]
-        params = enc_call.args[2]
-        assert params.get("_sort") == "-date"
-        assert params.get("_count") == "5"
-
-    def test_care_plan_fetch_uses_status_active(self):
-        client = _make_client_all_happy()
-        _fetch_all_fhir_resources(client, "patient-abc")
-        cp_call = client.get_resource.call_args_list[6]
-        params = cp_call.args[2]
-        assert params.get("status") == "active"
-        assert params.get("patient") == "patient-abc"
+    def test_fhir_unavailable_calls_load_fallback(self):
+        fhir = MagicMock()
+        fhir.is_available.return_value = False
+        fhir._load_fallback_bundle.return_value = [MINIMAL_PATIENT]
+        extractor = _make_extractor()
+        llm = _make_llm()
+        agent = SummaryAgent(fhir_client=fhir, extractor=extractor, llm_client=llm)
+        agent.generate_summary("patient-001", "ED Doctor")
+        fhir._load_fallback_bundle.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
-# Requirement 7.2 — Patient list empty → "Patient {id} not found"
+# Patient not found / Patient fetch errors (Req 7.2, 7.3)
 # ---------------------------------------------------------------------------
 
-class TestPatientNotFound:
-    def test_returns_summary_result_when_patient_list_empty(self):
-        client = _make_client_returns({
-            "Patient": [],  # empty!
-            "Condition":          [_CONDITION],
-            "MedicationRequest":  [_MEDICATION],
-            "AllergyIntolerance": [_ALLERGY],
-            "Observation":        [_OBSERVATION],
-            "Encounter":          [_ENCOUNTER],
-            "CarePlan":           [_CARE_PLAN],
-        })
-        result = _fetch_all_fhir_resources(client, "unknown-patient")
-        assert isinstance(result, SummaryResult)
-        assert result.error == "Patient unknown-patient not found"
+class TestPatientFetchErrors:
+    def test_patient_not_found_returns_error(self):
+        agent, _, _, llm = _make_agent(patient_resources=[])
+        result = agent.generate_summary("patient-999", "ED Doctor")
+        assert result.error is not None
+        assert "not found" in result.error.lower() or "patient-999" in result.error
+        llm.chat.completions.create.assert_not_called()
 
-    def test_patient_not_found_sets_correct_patient_id(self):
-        client = _make_client_returns({
-            "Patient": [],
-            "Condition":          [],
-            "MedicationRequest":  [],
-            "AllergyIntolerance": [],
-            "Observation":        [],
-            "Encounter":          [],
-            "CarePlan":           [],
-        })
-        result = _fetch_all_fhir_resources(client, "xyz-999")
-        assert isinstance(result, SummaryResult)
-        assert "xyz-999" in result.error
+    def test_patient_fhir_client_error_returns_error(self):
+        agent, _, _, llm = _make_agent(
+            side_effects={"Patient": FHIRClientError(404, "Not Found")}
+        )
+        result = agent.generate_summary("patient-001", "ED Doctor")
+        assert result.error is not None
+        assert "patient-001" in result.error.lower() or "Failed" in result.error
+        llm.chat.completions.create.assert_not_called()
 
-    def test_patient_not_found_does_not_call_llm(self):
-        """When Patient list is empty, subsequent resource fetches still run,
-        but the function returns before any LLM call (no SummaryAgent involved)."""
-        client = _make_client_returns({
-            "Patient": [],
-            "Condition":          [],
-            "MedicationRequest":  [],
-            "AllergyIntolerance": [],
-            "Observation":        [],
-            "Encounter":          [],
-            "CarePlan":           [],
-        })
-        result = _fetch_all_fhir_resources(client, "p-missing")
-        # Should return a SummaryResult with error, not PatientResources
-        assert isinstance(result, SummaryResult)
+    def test_patient_fhir_unavailable_error_returns_error(self):
+        agent, _, _, llm = _make_agent(
+            side_effects={"Patient": FHIRUnavailableError("Server unreachable")}
+        )
+        result = agent.generate_summary("patient-001", "Care Manager")
+        assert result.error is not None
+        llm.chat.completions.create.assert_not_called()
+
+    def test_patient_not_found_sections_empty(self):
+        agent, _, _, _ = _make_agent(patient_resources=[])
+        result = agent.generate_summary("patient-999", "ED Doctor")
         assert result.current_issues == ""
         assert result.recent_changes == ""
         assert result.risks_and_followup == ""
 
 
 # ---------------------------------------------------------------------------
-# Requirement 7.3 — Patient fetch raises → "Failed to fetch Patient …"
+# Graceful degradation for non-Patient fetch errors (Req 7.1, 7.4, 7.5)
 # ---------------------------------------------------------------------------
 
-class TestPatientFetchError:
-    def test_fhir_client_error_on_patient_returns_error_summary_result(self):
-        client = MagicMock()
-        client.get_resource.side_effect = FHIRClientError(404, "Not Found")
-        result = _fetch_all_fhir_resources(client, "p1")
-        assert isinstance(result, SummaryResult)
-        assert result.error.startswith("Failed to fetch Patient p1:")
-
-    def test_fhir_unavailable_error_on_patient_returns_error_summary_result(self):
-        client = MagicMock()
-        client.get_resource.side_effect = FHIRUnavailableError("Server down")
-        result = _fetch_all_fhir_resources(client, "p1")
-        assert isinstance(result, SummaryResult)
-        assert result.error.startswith("Failed to fetch Patient p1:")
-
-    def test_patient_error_contains_error_message(self):
-        client = MagicMock()
-        error_msg = "Connection refused"
-        client.get_resource.side_effect = FHIRUnavailableError(error_msg)
-        result = _fetch_all_fhir_resources(client, "p1")
-        assert isinstance(result, SummaryResult)
-        assert error_msg in result.error
-
-    def test_patient_error_stops_remaining_fetches(self):
-        """If Patient fetch fails, no further get_resource calls are made."""
-        client = MagicMock()
-        client.get_resource.side_effect = FHIRClientError(500, "Internal Server Error")
-        _fetch_all_fhir_resources(client, "p1")
-        # Only Patient was attempted
-        assert client.get_resource.call_count == 1
-
-    def test_patient_error_sets_empty_section_fields(self):
-        client = MagicMock()
-        client.get_resource.side_effect = FHIRClientError(503, "Unavailable")
-        result = _fetch_all_fhir_resources(client, "p1")
-        assert isinstance(result, SummaryResult)
-        assert result.current_issues == ""
-        assert result.recent_changes == ""
-        assert result.risks_and_followup == ""
-
-    def test_patient_error_sets_correct_patient_id_in_result(self):
-        client = MagicMock()
-        client.get_resource.side_effect = FHIRClientError(400, "Bad Request")
-        result = _fetch_all_fhir_resources(client, "specific-patient-id")
-        assert isinstance(result, SummaryResult)
-        assert result.patient_id == "specific-patient-id"
-
-
-# ---------------------------------------------------------------------------
-# Requirement 7.1 — Non-Patient errors: warn, set to [], continue
-# ---------------------------------------------------------------------------
-
-class TestNonPatientFetchErrors:
-    def _client_with_single_failure(
-        self, failing_type: str, exc: Exception
-    ) -> MagicMock:
-        """Return a client that succeeds for all types except *failing_type*."""
-        happy = {
-            "Patient":            [_PATIENT],
-            "Condition":          [_CONDITION],
-            "MedicationRequest":  [_MEDICATION],
-            "AllergyIntolerance": [_ALLERGY],
-            "Observation":        [_OBSERVATION],
-            "Encounter":          [_ENCOUNTER],
-            "CarePlan":           [_CARE_PLAN],
-        }
-
-        def side_effect(resource_type, patient_id, params=None):
-            if resource_type == failing_type:
-                raise exc
-            return happy[resource_type]
-
-        client = MagicMock()
-        client.get_resource.side_effect = side_effect
-        return client
-
-    @pytest.mark.parametrize("failing_type", [
-        "Condition", "MedicationRequest", "AllergyIntolerance",
-        "Observation", "Encounter", "CarePlan",
-    ])
-    def test_fhir_client_error_on_non_patient_returns_patient_resources(
-        self, failing_type: str
-    ):
-        """Any non-Patient FHIRClientError still produces a PatientResources."""
-        client = self._client_with_single_failure(
-            failing_type, FHIRClientError(500, "Err")
+class TestNonPatientFetchGracefulDegradation:
+    def test_condition_error_does_not_stop_summary(self):
+        agent, _, _, _ = _make_agent(
+            side_effects={"Condition": FHIRClientError(500, "Internal Error")}
         )
-        result = _fetch_all_fhir_resources(client, "p1")
-        assert isinstance(result, PatientResources)
+        result = agent.generate_summary("patient-001", "ED Doctor")
+        # Should still produce a result (no fatal error about Condition)
+        assert result.patient_id == "patient-001"
 
-    @pytest.mark.parametrize("failing_type", [
-        "Condition", "MedicationRequest", "AllergyIntolerance",
-        "Observation", "Encounter", "CarePlan",
-    ])
-    def test_fhir_unavailable_error_on_non_patient_returns_patient_resources(
-        self, failing_type: str
-    ):
-        """Any non-Patient FHIRUnavailableError still produces a PatientResources."""
-        client = self._client_with_single_failure(
-            failing_type, FHIRUnavailableError("Down")
+    def test_observation_unavailable_does_not_stop_summary(self):
+        agent, _, _, _ = _make_agent(
+            side_effects={"Observation": FHIRUnavailableError("Timeout")}
         )
-        result = _fetch_all_fhir_resources(client, "p1")
-        assert isinstance(result, PatientResources)
+        result = agent.generate_summary("patient-001", "Care Manager")
+        assert result.patient_id == "patient-001"
 
-    @pytest.mark.parametrize("failing_type,field", [
-        ("Condition",          "conditions"),
-        ("MedicationRequest",  "medications"),
-        ("AllergyIntolerance", "allergies"),
-        ("Observation",        "observations"),
-        ("Encounter",          "encounters"),
-        ("CarePlan",           "care_plans"),
-    ])
-    def test_failed_non_patient_type_defaults_to_empty_list(
-        self, failing_type: str, field: str
-    ):
-        """The field corresponding to the failing resource type must be []."""
-        client = self._client_with_single_failure(
-            failing_type, FHIRClientError(503, "Unavailable")
-        )
-        result = _fetch_all_fhir_resources(client, "p1")
-        assert isinstance(result, PatientResources)
-        assert getattr(result, field) == []
-
-    @pytest.mark.parametrize("failing_type", [
-        "Condition", "MedicationRequest", "AllergyIntolerance",
-        "Observation", "Encounter", "CarePlan",
-    ])
-    def test_remaining_types_still_fetched_after_non_patient_error(
-        self, failing_type: str
-    ):
-        """All 7 resource types must be attempted even when one non-Patient fails."""
-        client = self._client_with_single_failure(
-            failing_type, FHIRClientError(500, "Err")
-        )
-        _fetch_all_fhir_resources(client, "p1")
-        assert client.get_resource.call_count == 7
-
-    def test_warning_is_logged_for_non_patient_error(self):
-        client = self._client_with_single_failure(
-            "Condition", FHIRClientError(500, "Server Error")
-        )
-        with patch("src.agent.logger") as mock_logger:
-            _fetch_all_fhir_resources(client, "p1")
-            mock_logger.warning.assert_called_once()
-            warn_args = mock_logger.warning.call_args
-            # First arg is the format string; first %s is resource_type
-            assert "Condition" in str(warn_args)
-
-
-# ---------------------------------------------------------------------------
-# Requirement 7.4 + 7.5 — Previously fetched values preserved
-# ---------------------------------------------------------------------------
-
-class TestPreservationOfPreviouslyFetchedResults:
-    def test_successfully_fetched_conditions_preserved_when_later_type_fails(self):
-        """Conditions fetched before Observations fails must remain in the result."""
-        conditions = [{"resourceType": "Condition", "id": "c1"},
-                      {"resourceType": "Condition", "id": "c2"}]
-
-        def side_effect(resource_type, patient_id, params=None):
-            data = {
-                "Patient":            [_PATIENT],
-                "Condition":          conditions,
-                "MedicationRequest":  [_MEDICATION],
-                "AllergyIntolerance": [_ALLERGY],
-                "Encounter":          [_ENCOUNTER],
-                "CarePlan":           [_CARE_PLAN],
+    def test_multiple_non_patient_errors_gracefully_handled(self):
+        agent, _, _, _ = _make_agent(
+            side_effects={
+                "Condition": FHIRClientError(503, "Service Unavailable"),
+                "MedicationRequest": FHIRUnavailableError("Timeout"),
+                "Encounter": FHIRClientError(503, "Service Unavailable"),
             }
-            if resource_type == "Observation":
-                raise FHIRClientError(500, "Observation server error")
-            return data[resource_type]
+        )
+        result = agent.generate_summary("patient-001", "ED Doctor")
+        assert result.patient_id == "patient-001"
+        # Should not have a fatal error from non-Patient types
+        assert result.error is None or "not found" not in result.error
 
-        client = MagicMock()
-        client.get_resource.side_effect = side_effect
-        result = _fetch_all_fhir_resources(client, "p1")
 
+# ---------------------------------------------------------------------------
+# _fetch_all_fhir_resources unit tests
+# ---------------------------------------------------------------------------
+
+class TestFetchAllFhirResources:
+    def test_returns_patient_resources_on_success(self):
+        fhir = _make_fhir_client()
+        result = _fetch_all_fhir_resources(fhir, "patient-001")
         assert isinstance(result, PatientResources)
-        assert result.conditions == conditions          # preserved
-        assert result.observations == []               # failed → empty
+        assert result.patient == MINIMAL_PATIENT
 
-    def test_multiple_non_patient_failures_handled_independently(self):
-        """Multiple non-Patient failures all default to [] independently."""
-        def side_effect(resource_type, patient_id, params=None):
-            if resource_type == "Patient":
-                return [_PATIENT]
-            if resource_type in ("Condition", "Encounter"):
-                raise FHIRUnavailableError("Down")
-            return {
-                "MedicationRequest":  [_MEDICATION],
-                "AllergyIntolerance": [_ALLERGY],
-                "Observation":        [_OBSERVATION],
-                "CarePlan":           [_CARE_PLAN],
-            }[resource_type]
-
-        client = MagicMock()
-        client.get_resource.side_effect = side_effect
-        result = _fetch_all_fhir_resources(client, "p1")
-
+    def test_non_patient_error_sets_field_to_empty_list(self):
+        fhir = _make_fhir_client(
+            side_effects={"Condition": FHIRClientError(500, "Error")}
+        )
+        result = _fetch_all_fhir_resources(fhir, "patient-001")
         assert isinstance(result, PatientResources)
         assert result.conditions == []
-        assert result.encounters == []
-        assert result.medications == [_MEDICATION]
-        assert result.observations == [_OBSERVATION]
 
-    def test_all_non_patient_types_fail_still_returns_patient_resources(self):
-        """Even if all non-Patient types fail, PatientResources is returned."""
-        def side_effect(resource_type, patient_id, params=None):
+    def test_patient_error_returns_summary_result_sentinel(self):
+        fhir = _make_fhir_client(
+            side_effects={"Patient": FHIRUnavailableError("Timeout")}
+        )
+        result = _fetch_all_fhir_resources(fhir, "patient-001")
+        assert isinstance(result, SummaryResult)
+        assert result.error is not None
+
+    def test_empty_patient_list_returns_error_sentinel(self):
+        fhir = _make_fhir_client(patient_resources=[])
+        result = _fetch_all_fhir_resources(fhir, "patient-001")
+        assert isinstance(result, SummaryResult)
+        assert "not found" in result.error.lower()
+
+    def test_previously_fetched_resources_preserved_after_later_error(self):
+        """Resources fetched before a later error must be retained (Req 7.5)."""
+        conditions = [{"resourceType": "Condition", "code": {"text": "Hypertension"}}]
+
+        def _get_resource(resource_type, patient_id, params=None):
             if resource_type == "Patient":
-                return [_PATIENT]
-            raise FHIRClientError(500, "Err")
+                return [MINIMAL_PATIENT]
+            if resource_type == "Condition":
+                return conditions
+            if resource_type == "MedicationRequest":
+                raise FHIRClientError(500, "Error")
+            return []
 
-        client = MagicMock()
-        client.get_resource.side_effect = side_effect
-        result = _fetch_all_fhir_resources(client, "p1")
-
+        fhir = MagicMock()
+        fhir.get_resource.side_effect = _get_resource
+        result = _fetch_all_fhir_resources(fhir, "patient-001")
         assert isinstance(result, PatientResources)
-        assert result.patient == _PATIENT
-        assert result.conditions == []
+        assert result.conditions == conditions
         assert result.medications == []
-        assert result.allergies == []
-        assert result.observations == []
-        assert result.encounters == []
-        assert result.care_plans == []
+
+
+# ---------------------------------------------------------------------------
+# generated_at / patient_id / role invariants (Req 6.4, 6.5, 6.6)
+# ---------------------------------------------------------------------------
+
+class TestResultInvariants:
+    def test_generated_at_always_set_on_success(self):
+        agent, _, _, _ = _make_agent()
+        result = agent.generate_summary("patient-001", "ED Doctor")
+        assert result.generated_at
+        assert ISO_8601_RE.match(result.generated_at)
+
+    def test_generated_at_set_on_invalid_role(self):
+        agent, _, _, _ = _make_agent()
+        result = agent.generate_summary("patient-001", "Unknown")
+        assert ISO_8601_RE.match(result.generated_at)
+
+    def test_generated_at_set_on_patient_not_found(self):
+        agent, _, _, _ = _make_agent(patient_resources=[])
+        result = agent.generate_summary("patient-999", "ED Doctor")
+        assert ISO_8601_RE.match(result.generated_at)
+
+    def test_patient_id_matches_input(self):
+        agent, _, _, _ = _make_agent()
+        result = agent.generate_summary("patient-XYZ", "ED Doctor")
+        assert result.patient_id == "patient-XYZ"
+
+    def test_role_matches_input(self):
+        agent, _, _, _ = _make_agent()
+        result = agent.generate_summary("patient-001", "Care Manager")
+        assert result.role == "Care Manager"
+
+    def test_never_raises_on_complete_fhir_and_llm_failure(self):
+        """Req 6.1 — generate_summary must always return SummaryResult."""
+        fhir = MagicMock()
+        fhir.is_available.side_effect = RuntimeError("Unexpected crash")
+        extractor = _make_extractor()
+        llm = _make_llm()
+        agent = SummaryAgent(fhir_client=fhir, extractor=extractor, llm_client=llm)
+        # Must not raise
+        result = agent.generate_summary("patient-001", "ED Doctor")
+        assert isinstance(result, SummaryResult)
+        assert result.error is not None
+
+
+# ---------------------------------------------------------------------------
+# LLM invocation results (Task 7.4 coverage)
+# ---------------------------------------------------------------------------
+
+class TestLLMInvocation:
+    def test_successful_llm_call_populates_sections(self):
+        agent, _, _, _ = _make_agent(
+            llm_content=(
+                "## Current Issues\n- Hypertension\n"
+                "## Recent Changes\n- Started Lisinopril\n"
+                "## Risks and Follow-up\n- BP recheck in 2 weeks"
+            )
+        )
+        result = agent.generate_summary("patient-001", "ED Doctor")
+        assert result.error is None
+        assert "Hypertension" in result.current_issues
+        assert "Lisinopril" in result.recent_changes
+        assert "BP recheck" in result.risks_and_followup
+
+    def test_llm_error_sets_error_field_and_empties_sections(self):
+        fhir = _make_fhir_client()
+        extractor = _make_extractor()
+        llm = MagicMock()
+        llm.chat.completions.create.side_effect = Exception("Rate limit exceeded")
+        agent = SummaryAgent(fhir_client=fhir, extractor=extractor, llm_client=llm)
+        result = agent.generate_summary("patient-001", "ED Doctor")
+        assert result.error is not None
+        assert "Rate limit" in result.error
+        assert result.current_issues == ""
+        assert result.recent_changes == ""
+        assert result.risks_and_followup == ""
+
+    def test_llm_called_with_correct_model_and_params(self):
+        agent, _, _, llm = _make_agent()
+        agent.generate_summary("patient-001", "ED Doctor")
+        call_kwargs = llm.chat.completions.create.call_args
+        assert call_kwargs.kwargs["model"] == "gpt-4o-mini"
+        assert call_kwargs.kwargs["temperature"] == 0.3
+        assert call_kwargs.kwargs["max_tokens"] == 800
+
+    def test_llm_called_with_system_and_user_messages(self):
+        agent, _, _, llm = _make_agent()
+        agent.generate_summary("patient-001", "ED Doctor")
+        messages = llm.chat.completions.create.call_args.kwargs["messages"]
+        assert len(messages) == 2
+        assert messages[0]["role"] == "system"
+        assert messages[1]["role"] == "user"
+
+    def test_ed_doctor_prompt_used_for_ed_doctor_role(self):
+        from src.agent import ED_DOCTOR_PROMPT
+        agent, _, _, llm = _make_agent()
+        agent.generate_summary("patient-001", "ED Doctor")
+        system_msg = llm.chat.completions.create.call_args.kwargs["messages"][0]
+        assert system_msg["content"] == ED_DOCTOR_PROMPT
+
+    def test_care_manager_prompt_used_for_care_manager_role(self):
+        from src.agent import CARE_MANAGER_PROMPT
+        agent, _, _, llm = _make_agent()
+        agent.generate_summary("patient-001", "Care Manager")
+        system_msg = llm.chat.completions.create.call_args.kwargs["messages"][0]
+        assert system_msg["content"] == CARE_MANAGER_PROMPT

@@ -10,59 +10,60 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from src.exceptions import FHIRClientError, FHIRUnavailableError
-from src.models import PatientResources, SummaryResult  # noqa: F401
+from src.models import PatientResources, SummaryResult
 
 if TYPE_CHECKING:
-    from openai import OpenAI
-
     from src.context_extractor import PatientContextExtractor
     from src.fhir_client import FHIRClient
 
 logger = logging.getLogger(__name__)
 
-
 # ---------------------------------------------------------------------------
 # Role-specific system prompts (Requirements 4.1, 4.2)
 # ---------------------------------------------------------------------------
 
-ED_DOCTOR_PROMPT = """\
-You are a clinical AI assistant generating a concise patient summary for an Emergency Department physician.
-Focus on: active diagnoses, current medications and allergies (drug safety), the most recent labs and vitals,
-and any acute concerns. Be brief, use medical shorthand where appropriate, and highlight anything
-immediately actionable. Do not include care management goals or long-term follow-up plans.
+ED_DOCTOR_PROMPT = (
+    "You are a clinical AI assistant generating a concise patient summary for an Emergency "
+    "Department physician.\n"
+    "Focus on: active diagnoses, current medications and allergies (drug safety), the most recent "
+    "labs and vitals,\n"
+    "and any acute concerns. Be brief, use medical shorthand where appropriate, and highlight "
+    "anything\n"
+    "immediately actionable. Do not include care management goals or long-term follow-up plans.\n"
+    "\n"
+    "Structure your response EXACTLY as:\n"
+    "## Current Issues\n"
+    "<bullet points>\n"
+    "\n"
+    "## Recent Changes\n"
+    "<bullet points>\n"
+    "\n"
+    "## Risks and Follow-up\n"
+    "<bullet points>"
+)
 
-Structure your response EXACTLY as:
-## Current Issues
-<bullet points>
+CARE_MANAGER_PROMPT = (
+    "You are a clinical AI assistant generating a patient summary for a Care Manager focused on "
+    "chronic\n"
+    "disease management and care coordination. Focus on: chronic conditions, medication adherence,\n"
+    "pending care plan goals, upcoming follow-up needs, and social/functional risks.\n"
+    "Use plain clinical language. Include actionable care coordination items.\n"
+    "\n"
+    "Structure your response EXACTLY as:\n"
+    "## Current Issues\n"
+    "<bullet points>\n"
+    "\n"
+    "## Recent Changes\n"
+    "<bullet points>\n"
+    "\n"
+    "## Risks and Follow-up\n"
+    "<bullet points>"
+)
 
-## Recent Changes
-<bullet points>
-
-## Risks and Follow-up
-<bullet points>"""
-
-CARE_MANAGER_PROMPT = """\
-You are a clinical AI assistant generating a patient summary for a Care Manager focused on chronic
-disease management and care coordination. Focus on: chronic conditions, medication adherence,
-pending care plan goals, upcoming follow-up needs, and social/functional risks.
-Use plain clinical language. Include actionable care coordination items.
-
-Structure your response EXACTLY as:
-## Current Issues
-<bullet points>
-
-## Recent Changes
-<bullet points>
-
-## Risks and Follow-up
-<bullet points>"""
-
-# Map role names to their prompts (used in generate_summary)
 _ROLE_PROMPTS: dict[str, str] = {
     "ED Doctor": ED_DOCTOR_PROMPT,
     "Care Manager": CARE_MANAGER_PROMPT,
 }
-
 
 # ---------------------------------------------------------------------------
 # Header → key mapping (case-sensitive, must match exactly on their own line)
@@ -127,22 +128,8 @@ def parse_sections(raw_text: str) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# FHIR Fetch Algorithm (Requirements 7.1–7.5)
+# FHIR fetch helper (Task 7.2)
 # ---------------------------------------------------------------------------
-
-# Ordered list of (resource_type, base_params) pairs as specified in the
-# design document §Algorithmic Pseudocode.  The patient filter param
-# (_id for Patient, patient= for others) is injected at call time.
-_RESOURCE_FETCH_PLAN: list[tuple[str, dict[str, str]]] = [
-    ("Patient",            {}),
-    ("Condition",          {"clinical-status": "active"}),
-    ("MedicationRequest",  {"status": "active"}),
-    ("AllergyIntolerance", {}),
-    ("Observation",        {"_sort": "-date", "_count": "20"}),
-    ("Encounter",          {"_sort": "-date", "_count": "5"}),
-    ("CarePlan",           {"status": "active"}),
-]
-
 
 def _fetch_all_fhir_resources(
     fhir_client: "FHIRClient",
@@ -150,66 +137,45 @@ def _fetch_all_fhir_resources(
 ) -> "PatientResources | SummaryResult":
     """Fetch all seven FHIR resource types for *patient_id* with graceful degradation.
 
-    Implements the FHIR Fetch Algorithm from design §Algorithmic Pseudocode
-    (Requirements 7.1–7.5):
+    Returns a ``PatientResources`` on success.  Returns a ``SummaryResult``
+    with ``error`` set (early-exit sentinel) when the Patient fetch itself
+    fails or yields no results.
 
-    - Iterates all seven resource types sequentially, preserving previously
-      fetched results throughout (Req 7.5).
-    - For **non-Patient** types: on ``FHIRClientError`` or
-      ``FHIRUnavailableError``, logs a warning, sets that field to ``[]``,
-      and continues fetching remaining types (Req 7.1, 7.4).
-    - If the **Patient** fetch raises an error, returns a ``SummaryResult``
-      immediately with
-      ``error="Failed to fetch Patient {patient_id}: {message}"`` (Req 7.3).
-    - If the Patient resource list is empty (0 results), returns a
-      ``SummaryResult`` with ``error="Patient {patient_id} not found"`` (Req 7.2).
-
-    Returns:
-        ``PatientResources`` on success, or a ``SummaryResult`` with ``error``
-        set if the Patient fetch fails or returns no results.
+    Non-Patient resource fetch failures are logged as warnings and the
+    corresponding field is set to an empty list (Requirements 7.1–7.5).
     """
+    # Ordered fetch list — (resource_type, extra_params)
+    _FETCH_PLAN = [
+        ("Patient",            {"_id": patient_id}),
+        ("Condition",          {"patient": patient_id, "clinical-status": "active"}),
+        ("MedicationRequest",  {"patient": patient_id, "status": "active"}),
+        ("AllergyIntolerance", {"patient": patient_id}),
+        ("Observation",        {"patient": patient_id, "_sort": "-date", "_count": "20"}),
+        ("Encounter",          {"patient": patient_id, "_sort": "-date", "_count": "5"}),
+        ("CarePlan",           {"patient": patient_id, "status": "active"}),
+    ]
+
     results: dict[str, list[dict]] = {}
 
-    for resource_type, base_params in _RESOURCE_FETCH_PLAN:
-        # Build per-call params with the patient filter injected
-        if resource_type == "Patient":
-            params: dict[str, str] = {"_id": patient_id}
-        else:
-            params = dict(base_params)
-            params["patient"] = patient_id
-
+    for resource_type, params in _FETCH_PLAN:
         try:
             entries = fhir_client.get_resource(resource_type, patient_id, params)
             results[resource_type] = entries
         except (FHIRClientError, FHIRUnavailableError) as exc:
             if resource_type == "Patient":
-                # Patient fetch failure → abort and return error result (Req 7.3)
-                return SummaryResult(
-                    patient_name="",
+                # Patient fetch failure is fatal — return error sentinel
+                return _error_result(
                     patient_id=patient_id,
-                    role="",
-                    current_issues="",
-                    recent_changes="",
-                    risks_and_followup="",
-                    data_source="fhir_server",
-                    generated_at=_utc_now_iso(),
                     error=f"Failed to fetch Patient {patient_id}: {exc}",
                 )
-            # Non-Patient failure → warn, default to [], continue (Req 7.1, 7.4, 7.5)
-            logger.warning("Failed to fetch %s: %s", resource_type, exc)
+            # Non-Patient failure: log and continue (Req 7.1)
+            logger.warning("Failed to fetch %s for patient %s: %s", resource_type, patient_id, exc)
             results[resource_type] = []
 
-    # Patient list empty → patient not found (Req 7.2)
+    # Guard: empty Patient result means the patient doesn't exist (Req 7.2)
     if not results.get("Patient"):
-        return SummaryResult(
-            patient_name="",
+        return _error_result(
             patient_id=patient_id,
-            role="",
-            current_issues="",
-            recent_changes="",
-            risks_and_followup="",
-            data_source="fhir_server",
-            generated_at=_utc_now_iso(),
             error=f"Patient {patient_id} not found",
         )
 
@@ -224,58 +190,129 @@ def _fetch_all_fhir_resources(
     )
 
 
+def _error_result(patient_id: str, error: str, role: str = "") -> SummaryResult:
+    """Return a SummaryResult carrying only the error field (all sections empty)."""
+    return SummaryResult(
+        patient_name="",
+        patient_id=patient_id,
+        role=role,
+        current_issues="",
+        recent_changes="",
+        risks_and_followup="",
+        data_source="fhir_server",  # placeholder; overridden by caller when needed
+        generated_at=_utc_now_iso(),
+        error=error,
+    )
+
+
+def _utc_now_iso() -> str:
+    """Return the current UTC time as an ISO 8601 string, e.g. '2026-06-05T14:30:00Z'."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 # ---------------------------------------------------------------------------
-# SummaryAgent
+# SummaryAgent (Tasks 7.1 / 7.4)
 # ---------------------------------------------------------------------------
 
 class SummaryAgent:
-    """Orchestrates FHIR data retrieval, context extraction, and LLM invocation.
+    """Orchestrates FHIR retrieval, context extraction, and LLM invocation.
 
-    Responsibilities:
-    - Detect whether to use the live FHIR server or the local fallback bundle
-    - Fetch all required FHIR resources (via ``_fetch_resources()``)
-    - Build a compact patient context string via ``PatientContextExtractor``
-    - Select the role-specific system prompt and call the OpenAI Chat API
-    - Return a ``SummaryResult``; never propagate unhandled exceptions
+    Requirements: 2.3, 2.4, 4.1–4.5, 6.1–6.7, 7.1–7.5
     """
 
     def __init__(
         self,
         fhir_client: "FHIRClient",
         extractor: "PatientContextExtractor",
-        llm_client: "OpenAI",
+        llm_client,  # openai.OpenAI instance — typed loosely to avoid hard dependency
     ) -> None:
-        """Initialise the agent.
-
-        Args:
-            fhir_client: Configured ``FHIRClient`` instance.
-            extractor:   Configured ``PatientContextExtractor`` instance.
-            llm_client:  Initialised ``openai.OpenAI`` client.
-        """
-        self._fhir_client = fhir_client
+        self._fhir = fhir_client
         self._extractor = extractor
-        self._llm_client = llm_client
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+        self._llm = llm_client
 
     def generate_summary(self, patient_id: str, role: str) -> SummaryResult:
-        """Generate a role-specific clinical summary for the given patient.
+        """Generate a role-specific clinical summary for *patient_id*.
 
-        Args:
-            patient_id: The FHIR patient ID to summarise.
-            role:       Clinician role — must be ``"ED Doctor"`` or
-                        ``"Care Manager"``.
-
-        Returns:
-            A ``SummaryResult`` containing the three summary sections and
-            metadata.  Never raises an unhandled exception (Requirement 6.1).
+        Always returns a ``SummaryResult`` — never raises an unhandled
+        exception (Requirement 6.1).
         """
         generated_at = _utc_now_iso()
 
-        # --- Role validation (Requirements 4.6, 6.7) ---------------------
-        if role not in _ROLE_PROMPTS:
+        try:
+            # --- Role validation (Req 4.3, 6.6, 6.7) ---
+            if role not in _ROLE_PROMPTS:
+                return SummaryResult(
+                    patient_name="",
+                    patient_id=patient_id,
+                    role=role,
+                    current_issues="",
+                    recent_changes="",
+                    risks_and_followup="",
+                    data_source="fhir_server",
+                    generated_at=generated_at,
+                    error=f"Unsupported role: {role}",
+                )
+
+            # --- Data-source determination (Req 2.3, 2.4) ---
+            if self._fhir.is_available():
+                data_source = "fhir_server"
+                fetch_result = _fetch_all_fhir_resources(self._fhir, patient_id)
+                # _fetch_all_fhir_resources may return an error SummaryResult
+                if isinstance(fetch_result, SummaryResult):
+                    # Patch in the correct metadata
+                    fetch_result.role = role
+                    fetch_result.data_source = data_source
+                    fetch_result.generated_at = generated_at
+                    return fetch_result
+                resources: PatientResources = fetch_result
+            else:
+                data_source = "local_fallback"
+                resources = self._load_fallback_resources(patient_id)
+                if isinstance(resources, SummaryResult):
+                    resources.role = role
+                    resources.data_source = data_source
+                    resources.generated_at = generated_at
+                    return resources
+
+            # --- Extract patient context string ---
+            context_text = self._extractor.extract(resources)
+
+            # --- LLM invocation (Task 7.4) ---
+            system_prompt = _ROLE_PROMPTS[role]
+            try:
+                response = self._llm.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": context_text},
+                    ],
+                    temperature=0.3,
+                    max_tokens=800,
+                )
+                raw_text = response.choices[0].message.content
+                sections = parse_sections(raw_text)
+                llm_error: str | None = None
+            except Exception as llm_exc:  # noqa: BLE001
+                sections = {"current_issues": "", "recent_changes": "", "risks_and_followup": ""}
+                llm_error = str(llm_exc)
+
+            # --- Extract patient name for result ---
+            patient_name = self._extract_patient_name(resources.patient)
+
+            return SummaryResult(
+                patient_name=patient_name,
+                patient_id=patient_id,
+                role=role,
+                current_issues=sections["current_issues"],
+                recent_changes=sections["recent_changes"],
+                risks_and_followup=sections["risks_and_followup"],
+                data_source=data_source,
+                generated_at=generated_at,
+                error=llm_error,
+            )
+
+        except Exception as exc:  # noqa: BLE001 — top-level safety net (Req 6.1)
+            logger.exception("Unhandled error in generate_summary: %s", exc)
             return SummaryResult(
                 patient_name="",
                 patient_id=patient_id,
@@ -283,66 +320,71 @@ class SummaryAgent:
                 current_issues="",
                 recent_changes="",
                 risks_and_followup="",
-                data_source="local_fallback",  # placeholder; no fetch occurred
+                data_source="fhir_server",
                 generated_at=generated_at,
-                error=f"Unsupported role: {role}",
+                error=str(exc),
             )
 
-        # --- Data-source determination (Requirements 2.3, 2.4) -----------
-        if self._fhir_client.is_available():
-            data_source: str = "fhir_server"
-            resources = self._fetch_resources(patient_id, use_live=True)
-        else:
-            data_source = "local_fallback"
-            resources = self._fetch_resources(patient_id, use_live=False)
+    # ---------------------------------------------------------------------- #
+    # Private helpers                                                         #
+    # ---------------------------------------------------------------------- #
 
-        # NOTE: LLM invocation is implemented in task 7.4.
-        # For now we return a placeholder SummaryResult after the fetch step.
-        # (The actual patient_name extraction and LLM call will be added in 7.4.)
-        return SummaryResult(
-            patient_name="",
-            patient_id=patient_id,
-            role=role,
-            current_issues="",
-            recent_changes="",
-            risks_and_followup="",
-            data_source=data_source,  # type: ignore[arg-type]
-            generated_at=generated_at,
-            error=None,
-        )
-
-    # ------------------------------------------------------------------
-    # Private helpers
-    # ------------------------------------------------------------------
-
-    def _fetch_resources(
-        self, patient_id: str, *, use_live: bool
+    def _load_fallback_resources(
+        self, patient_id: str
     ) -> "PatientResources | SummaryResult":
-        """Fetch all required FHIR resources for *patient_id*.
+        """Load patient resources from the local fallback bundle.
 
-        Args:
-            patient_id: The patient's FHIR ID.
-            use_live:   ``True`` → query the live FHIR server via
-                        ``_fetch_all_fhir_resources()``;
-                        ``False`` → load from the local fallback bundle
-                        (implemented in task 7.1 / 7.4).
-
-        Returns:
-            A ``PatientResources`` on success, or a ``SummaryResult`` with
-            ``error`` set if the Patient fetch fails or is not found.
+        Filters all bundle resources to those belonging to *patient_id*.
+        Returns an error SummaryResult if the bundle is missing/invalid or
+        the patient is not found in the bundle.
         """
-        if use_live:
-            return _fetch_all_fhir_resources(self._fhir_client, patient_id)
-        # Fallback path (local bundle) — implemented in task 7.4
-        raise NotImplementedError(
-            "_fetch_resources(use_live=False) is not yet implemented (task 7.4)"
+        try:
+            all_resources = self._fhir._load_fallback_bundle()
+        except RuntimeError as exc:
+            return _error_result(patient_id=patient_id, error=str(exc))
+
+        # Find the Patient resource matching patient_id
+        patients = [
+            r for r in all_resources
+            if r.get("resourceType") == "Patient" and r.get("id") == patient_id
+        ]
+        if not patients:
+            # If patient_id doesn't match any id, take the first patient
+            # (bundle may use server-assigned IDs we don't know yet)
+            patients = [r for r in all_resources if r.get("resourceType") == "Patient"]
+
+        if not patients:
+            return _error_result(
+                patient_id=patient_id,
+                error=f"Patient {patient_id} not found",
+            )
+
+        patient = patients[0]
+        actual_id = patient.get("id", patient_id)
+
+        def _of_type(rtype: str) -> list[dict]:
+            return [r for r in all_resources if r.get("resourceType") == rtype]
+
+        return PatientResources(
+            patient=patient,
+            conditions=_of_type("Condition"),
+            medications=_of_type("MedicationRequest"),
+            allergies=_of_type("AllergyIntolerance"),
+            observations=_of_type("Observation"),
+            encounters=_of_type("Encounter"),
+            care_plans=_of_type("CarePlan"),
         )
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _utc_now_iso() -> str:
-    """Return the current UTC time as an ISO 8601 string ending in 'Z'."""
-    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    @staticmethod
+    def _extract_patient_name(patient: dict) -> str:
+        """Extract a display name from a FHIR Patient resource dict."""
+        names = patient.get("name", [])
+        if not names:
+            return "Unknown"
+        first = names[0]
+        if first.get("text"):
+            return first["text"]
+        given = " ".join(first.get("given", []))
+        family = first.get("family", "")
+        parts = [p for p in [given, family] if p]
+        return " ".join(parts) if parts else "Unknown"
