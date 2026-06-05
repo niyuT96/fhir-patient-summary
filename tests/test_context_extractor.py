@@ -354,3 +354,411 @@ class TestExtractContract:
         assert resources.observations == original.observations
         assert resources.encounters == original.encounters
         assert resources.care_plans == original.care_plans
+
+
+# ---------------------------------------------------------------------------
+# Observations (task 5.2)
+# ---------------------------------------------------------------------------
+
+class TestObservations:
+    def test_observation_formatted_correctly(self):
+        obs = {
+            "resourceType": "Observation",
+            "code": {"text": "Heart Rate"},
+            "valueQuantity": {"value": 72, "unit": "bpm"},
+            "effectiveDateTime": "2024-03-15T10:00:00Z",
+        }
+        resources = make_resources(observations=[obs])
+        output = extractor.extract(resources)
+        assert "Heart Rate: 72 bpm (2024-03-15)" in output
+
+    def test_observation_without_unit(self):
+        obs = {
+            "resourceType": "Observation",
+            "code": {"text": "Pain Score"},
+            "valueQuantity": {"value": 5},
+            "effectiveDateTime": "2024-03-15T10:00:00Z",
+        }
+        resources = make_resources(observations=[obs])
+        output = extractor.extract(resources)
+        assert "Pain Score: 5" in output
+        assert "(2024-03-15)" in output
+
+    def test_observation_ordered_newest_first(self):
+        obs1 = {
+            "resourceType": "Observation",
+            "code": {"text": "Glucose"},
+            "valueQuantity": {"value": 100, "unit": "mg/dL"},
+            "effectiveDateTime": "2024-01-01T00:00:00Z",
+        }
+        obs2 = {
+            "resourceType": "Observation",
+            "code": {"text": "Glucose"},
+            "valueQuantity": {"value": 200, "unit": "mg/dL"},
+            "effectiveDateTime": "2024-06-01T00:00:00Z",
+        }
+        resources = make_resources(observations=[obs1, obs2])
+        output = extractor.extract(resources)
+        pos_200 = output.index("200")
+        pos_100 = output.index("100")
+        assert pos_200 < pos_100, "Newer observation (200) should appear before older (100)"
+
+    def test_only_10_most_recent_observations(self):
+        obs_list = [
+            {
+                "resourceType": "Observation",
+                "code": {"text": f"Test{i:02d}"},
+                "valueQuantity": {"value": i, "unit": "u"},
+                "effectiveDateTime": f"2024-{(i % 12) + 1:02d}-01T00:00:00Z",
+            }
+            for i in range(15)
+        ]
+        resources = make_resources(observations=obs_list)
+        output = extractor.extract(resources)
+        # At most 10 observation lines should appear
+        obs_section_start = output.index("=== Recent Observations ===")
+        obs_section_end = output.index("=== Recent Encounters ===")
+        obs_section = output[obs_section_start:obs_section_end]
+        obs_lines = [l for l in obs_section.splitlines() if l.startswith("- ")]
+        assert len(obs_lines) <= 10
+
+    def test_empty_observations_renders_none(self):
+        resources = make_resources(observations=[])
+        output = extractor.extract(resources)
+        section_start = output.index("=== Recent Observations ===")
+        section_excerpt = output[section_start:section_start + 80]
+        assert "None" in section_excerpt
+
+    def test_observation_without_value_skipped(self):
+        obs_no_value = {
+            "resourceType": "Observation",
+            "code": {"text": "BloodPressure"},
+            # no valueQuantity
+            "effectiveDateTime": "2024-03-15T10:00:00Z",
+        }
+        obs_with_value = {
+            "resourceType": "Observation",
+            "code": {"text": "HeartRate"},
+            "valueQuantity": {"value": 80, "unit": "bpm"},
+            "effectiveDateTime": "2024-03-15T09:00:00Z",
+        }
+        resources = make_resources(observations=[obs_no_value, obs_with_value])
+        output = extractor.extract(resources)
+        # BloodPressure has no value so it should not show up
+        assert "BloodPressure" not in output
+        assert "HeartRate: 80 bpm" in output
+
+    def test_input_observations_list_not_mutated(self):
+        """The original observations list order must not be changed."""
+        obs_old = {
+            "resourceType": "Observation",
+            "code": {"text": "Old"},
+            "valueQuantity": {"value": 1, "unit": "u"},
+            "effectiveDateTime": "2023-01-01T00:00:00Z",
+        }
+        obs_new = {
+            "resourceType": "Observation",
+            "code": {"text": "New"},
+            "valueQuantity": {"value": 2, "unit": "u"},
+            "effectiveDateTime": "2024-01-01T00:00:00Z",
+        }
+        resources = make_resources(observations=[obs_old, obs_new])
+        original_order = list(resources.observations)
+        extractor.extract(resources)
+        assert resources.observations == original_order
+
+
+# ---------------------------------------------------------------------------
+# Encounters (task 5.2)
+# ---------------------------------------------------------------------------
+
+class TestEncounters:
+    def test_encounter_formatted_with_all_fields(self):
+        enc = {
+            "resourceType": "Encounter",
+            "type": [{"text": "Emergency Visit"}],
+            "period": {"start": "2024-03-10T08:00:00Z"},
+            "reasonCode": [{"text": "Chest pain"}],
+        }
+        resources = make_resources(encounters=[enc])
+        output = extractor.extract(resources)
+        assert "Emergency Visit" in output
+        assert "2024-03-10" in output
+        assert "Chest pain" in output
+
+    def test_encounter_ordered_newest_first(self):
+        enc1 = {
+            "resourceType": "Encounter",
+            "type": [{"text": "Visit A"}],
+            "period": {"start": "2023-01-01T00:00:00Z"},
+        }
+        enc2 = {
+            "resourceType": "Encounter",
+            "type": [{"text": "Visit B"}],
+            "period": {"start": "2024-06-01T00:00:00Z"},
+        }
+        resources = make_resources(encounters=[enc1, enc2])
+        output = extractor.extract(resources)
+        pos_b = output.index("Visit B")
+        pos_a = output.index("Visit A")
+        assert pos_b < pos_a, "Newer encounter (Visit B) should appear before older (Visit A)"
+
+    def test_only_3_most_recent_encounters(self):
+        enc_list = [
+            {
+                "resourceType": "Encounter",
+                "type": [{"text": f"Visit{i}"}],
+                "period": {"start": f"2024-{i:02d}-01T00:00:00Z"},
+            }
+            for i in range(1, 6)
+        ]
+        resources = make_resources(encounters=enc_list)
+        output = extractor.extract(resources)
+        enc_section_start = output.index("=== Recent Encounters ===")
+        enc_section_end = output.index("=== Care Plan ===")
+        enc_section = output[enc_section_start:enc_section_end]
+        enc_lines = [l for l in enc_section.splitlines() if l.startswith("- ")]
+        assert len(enc_lines) <= 3
+
+    def test_encounter_absent_fields_omitted(self):
+        enc = {
+            "resourceType": "Encounter",
+            "type": [{"text": "Office Visit"}],
+            # no period, no reasonCode
+        }
+        resources = make_resources(encounters=[enc])
+        output = extractor.extract(resources)
+        assert "Office Visit" in output
+        # No date or reason should appear
+        assert "reason:" not in output
+
+    def test_empty_encounters_renders_none(self):
+        resources = make_resources(encounters=[])
+        output = extractor.extract(resources)
+        section_start = output.index("=== Recent Encounters ===")
+        section_excerpt = output[section_start:section_start + 80]
+        assert "None" in section_excerpt
+
+    def test_input_encounters_list_not_mutated(self):
+        enc_old = {
+            "resourceType": "Encounter",
+            "type": [{"text": "Old Visit"}],
+            "period": {"start": "2022-01-01T00:00:00Z"},
+        }
+        enc_new = {
+            "resourceType": "Encounter",
+            "type": [{"text": "New Visit"}],
+            "period": {"start": "2024-01-01T00:00:00Z"},
+        }
+        resources = make_resources(encounters=[enc_old, enc_new])
+        original_order = list(resources.encounters)
+        extractor.extract(resources)
+        assert resources.encounters == original_order
+
+
+# ---------------------------------------------------------------------------
+# Care Plan (task 5.2)
+# ---------------------------------------------------------------------------
+
+class TestCarePlan:
+    def test_care_plan_activity_description_rendered(self):
+        plan = {
+            "resourceType": "CarePlan",
+            "status": "active",
+            "activity": [
+                {"detail": {"description": "Walk 30 minutes daily"}},
+                {"detail": {"description": "Monitor blood pressure weekly"}},
+            ],
+        }
+        resources = make_resources(care_plans=[plan])
+        output = extractor.extract(resources)
+        assert "Walk 30 minutes daily" in output
+        assert "Monitor blood pressure weekly" in output
+
+    def test_care_plan_no_activities_renders_none(self):
+        plan = {
+            "resourceType": "CarePlan",
+            "status": "active",
+            "activity": [],
+        }
+        resources = make_resources(care_plans=[plan])
+        output = extractor.extract(resources)
+        section_start = output.index("=== Care Plan ===")
+        section_excerpt = output[section_start:section_start + 80]
+        assert "None" in section_excerpt
+
+    def test_empty_care_plans_renders_none(self):
+        resources = make_resources(care_plans=[])
+        output = extractor.extract(resources)
+        section_start = output.index("=== Care Plan ===")
+        section_excerpt = output[section_start:section_start + 80]
+        assert "None" in section_excerpt
+
+    def test_care_plan_activity_without_description_skipped(self):
+        plan = {
+            "resourceType": "CarePlan",
+            "status": "active",
+            "activity": [
+                {"detail": {}},  # no description
+                {"detail": {"description": "Take medication as prescribed"}},
+            ],
+        }
+        resources = make_resources(care_plans=[plan])
+        output = extractor.extract(resources)
+        assert "Take medication as prescribed" in output
+
+
+# ---------------------------------------------------------------------------
+# Token budget enforcement (task 5.2)
+# ---------------------------------------------------------------------------
+
+class TestTokenBudget:
+    def test_output_within_3000_tokens_for_large_input(self):
+        """Token count must never exceed 3,000 even with many resources."""
+        import tiktoken
+        enc = tiktoken.get_encoding("cl100k_base")
+
+        # Generate many observations, encounters, conditions, medications, allergies
+        many_obs = [
+            {
+                "resourceType": "Observation",
+                "code": {"text": f"Lab test number {i} with a fairly long name to inflate tokens"},
+                "valueQuantity": {"value": i * 1.23456, "unit": "units/mL"},
+                "effectiveDateTime": f"2024-{(i % 12) + 1:02d}-{(i % 28) + 1:02d}T10:00:00Z",
+            }
+            for i in range(50)
+        ]
+        many_enc = [
+            {
+                "resourceType": "Encounter",
+                "type": [{"text": f"Encounter type {i} detailed description here"}],
+                "period": {"start": f"2024-{(i % 12) + 1:02d}-01T00:00:00Z"},
+                "reasonCode": [{"text": f"Reason for visit {i} with extended clinical notes"}],
+            }
+            for i in range(20)
+        ]
+        many_cond = [
+            {
+                "resourceType": "Condition",
+                "code": {"text": f"Active chronic diagnosis number {i} with ICD-10 coding"},
+            }
+            for i in range(30)
+        ]
+        many_meds = [
+            {
+                "resourceType": "MedicationRequest",
+                "medicationCodeableConcept": {"text": f"Medication {i} 100mg extended release"},
+                "dosageInstruction": [{"text": f"Take 2 tablets by mouth twice daily with food {i}"}],
+            }
+            for i in range(30)
+        ]
+        many_allerg = [
+            {
+                "resourceType": "AllergyIntolerance",
+                "code": {"text": f"Allergen substance {i}"},
+                "criticality": "high",
+                "reaction": [{"manifestation": [{"text": f"Severe reaction type {i}"}]}],
+            }
+            for i in range(20)
+        ]
+        many_plans = [
+            {
+                "resourceType": "CarePlan",
+                "status": "active",
+                "activity": [
+                    {"detail": {"description": f"Care activity {j} for plan {i}: detailed instructions"}}
+                    for j in range(10)
+                ],
+            }
+            for i in range(5)
+        ]
+
+        resources = make_resources(
+            observations=many_obs,
+            encounters=many_enc,
+            conditions=many_cond,
+            medications=many_meds,
+            allergies=many_allerg,
+            care_plans=many_plans,
+        )
+        output = extractor.extract(resources)
+        token_count = len(enc.encode(output))
+        assert token_count <= 3000, (
+            f"Token count {token_count} exceeds 3,000 budget"
+        )
+
+    def test_demographics_always_present_after_truncation(self):
+        """Demographics section must survive even extreme truncation."""
+        import tiktoken
+        enc = tiktoken.get_encoding("cl100k_base")
+
+        # Fill with many long conditions to force truncation
+        many_cond = [
+            {
+                "resourceType": "Condition",
+                "code": {"text": "A" * 200},  # very long condition name
+            }
+            for _ in range(100)
+        ]
+        resources = make_resources(conditions=many_cond)
+        output = extractor.extract(resources)
+        assert "=== Patient Demographics ===" in output
+        assert "Name: John Doe" in output
+        token_count = len(enc.encode(output))
+        assert token_count <= 3000
+
+    def test_truncation_removes_careplan_activities_first(self):
+        """When over budget, CarePlan activities should be removed before encounters."""
+        # Build a context that is just barely over budget only when care plan is added
+        # Use moderate data that fits in budget without care plan activities
+        care_plan_with_many_activities = {
+            "resourceType": "CarePlan",
+            "status": "active",
+            "activity": [
+                {"detail": {"description": "B" * 300}}
+                for _ in range(30)
+            ],
+        }
+        resources = make_resources(
+            encounters=[
+                {
+                    "resourceType": "Encounter",
+                    "type": [{"text": "Important Encounter"}],
+                    "period": {"start": "2024-01-01T00:00:00Z"},
+                }
+            ],
+            care_plans=[care_plan_with_many_activities],
+        )
+        output = extractor.extract(resources)
+        # The encounter should survive even if care plan activities are truncated
+        assert "Important Encounter" in output
+
+    def test_normal_sized_input_within_budget(self):
+        """A typical patient record should comfortably fit within 3,000 tokens."""
+        import tiktoken
+        enc = tiktoken.get_encoding("cl100k_base")
+
+        resources = make_resources(
+            conditions=[{"resourceType": "Condition", "code": {"text": "Hypertension"}}],
+            medications=[{
+                "resourceType": "MedicationRequest",
+                "medicationCodeableConcept": {"text": "Lisinopril"},
+                "dosageInstruction": [{"text": "10mg once daily"}],
+            }],
+            allergies=[{
+                "resourceType": "AllergyIntolerance",
+                "code": {"text": "Penicillin"},
+                "criticality": "high",
+            }],
+            observations=[{
+                "resourceType": "Observation",
+                "code": {"text": "Blood Pressure"},
+                "valueQuantity": {"value": 130, "unit": "mmHg"},
+                "effectiveDateTime": "2024-03-01T00:00:00Z",
+            }],
+        )
+        output = extractor.extract(resources)
+        token_count = len(enc.encode(output))
+        assert token_count <= 3000, (
+            f"Token count {token_count} exceeds 3,000 budget for normal input"
+        )

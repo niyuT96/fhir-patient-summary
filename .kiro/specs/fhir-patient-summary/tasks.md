@@ -68,15 +68,15 @@ The implementation follows the component order: data models and shared types →
     - **Property 9: Section parsing correctness** — for any string containing the three expected headers with arbitrary content between them, `parse_sections()` must extract content into the correct keys with whitespace stripped; for strings without those headers, the raw text must be preserved in `risks_and_followup`
     - **Validates: Requirements 5.2, 5.6, 5.7**
 
-- [ ] 5. Implement PatientContextExtractor
-  - [-] 5.1 Implement demographics, conditions, medications, and allergies extraction
+- [x] 5. Implement PatientContextExtractor
+  - [x] 5.1 Implement demographics, conditions, medications, and allergies extraction
     - Extract patient demographics from `patient.name[0].text` (or `given` + `family` if `text` absent), `patient.birthDate`, `patient.gender`, and MRN from `patient.identifier` where `type.coding[0].code == "MR"`
     - Summarize conditions using `condition.code.text`, falling back to `condition.code.coding[0].display`, then `"Unknown condition"`
     - List medications with `medicationCodeableConcept.text` for drug name and `dosageInstruction[0].text` for dosage (omit dosage field if absent)
     - List allergies with `code.text` for substance, `criticality` for severity, and `reaction[0].manifestation[0].text` for reaction (omit absent fields)
     - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5_
 
-  - [~] 5.2 Implement observations, encounters, CarePlan extraction, and token-budget enforcement
+  - [x] 5.2 Implement observations, encounters, CarePlan extraction, and token-budget enforcement
     - Format up to the 10 most recent Observation resources ordered by `effectiveDateTime` descending as `"{name}: {value} {unit} ({date})"`
     - Summarize up to the 3 most recent Encounter resources ordered by `period.start` descending using type, date, and reason (omit absent fields)
     - Include active CarePlan goals (resolved within the same `PatientResources`) and activities from `activity[].detail.description`; render as `"None"` if neither is present
@@ -101,18 +101,18 @@ The implementation follows the component order: data models and shared types →
     - **Property 7: PatientResources immutability** — for any `PatientResources` value, calling `extract()` must leave all fields of the input object unchanged (same resource dicts, same list lengths, same field values) before and after the call
     - **Validates: Requirements 3.11**
 
-- [~] 6. Checkpoint — Ensure all PatientContextExtractor and parse_sections tests pass
+- [x] 6. Checkpoint — Ensure all PatientContextExtractor and parse_sections tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 7. Implement SummaryAgent
-  - [~] 7.1 Implement role-specific prompts and `generate_summary()` core logic
+  - [-] 7.1 Implement role-specific prompts and `generate_summary()` core logic
     - Define ED Doctor and Care Manager system prompts exactly as specified in the design document
     - Implement `SummaryAgent.__init__()` accepting `fhir_client`, `extractor`, and `llm_client`
     - Implement the data-source determination: call `fhir_client.is_available()`; if `True` proceed with live fetch and set `data_source="fhir_server"`; if `False` load from local bundle and set `data_source="local_fallback"`
     - Return `SummaryResult` with `error="Unsupported role: {role}"` and empty section fields immediately (without calling LLM) for any role other than `"ED Doctor"` or `"Care Manager"`
     - _Requirements: 2.3, 2.4, 4.1, 4.2, 4.3, 6.6, 6.7_
 
-  - [~] 7.2 Implement FHIR resource fetching with graceful degradation
+  - [-] 7.2 Implement FHIR resource fetching with graceful degradation
     - Fetch all seven resource types sequentially using the query parameters defined in the FHIR Fetch Algorithm (design §Algorithmic Pseudocode)
     - On `FHIRClientError` or `FHIRUnavailableError` for non-Patient resource types: log a warning with the resource type and error message, set that field to `[]`, and continue fetching remaining types; preserve all previously fetched results
     - If the Patient fetch itself raises an error, return `SummaryResult` with `error="Failed to fetch Patient {id}: {error_message}"` and do not call the LLM
