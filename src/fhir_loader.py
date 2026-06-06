@@ -1,8 +1,8 @@
 """
-FHIRLoader — one-time startup script that POSTs the local synthetic FHIR
+FHIRLoader is a one-time startup script that POSTs the local synthetic FHIR
 bundle to the IRIS FHIR R4 server.
 
-Requirements: 9.1–9.5
+Requirements: 9.1-9.5
 """
 
 from __future__ import annotations

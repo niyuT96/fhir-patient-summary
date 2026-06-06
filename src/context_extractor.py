@@ -1,12 +1,12 @@
 """
-PatientContextExtractor — converts raw FHIR resource lists into a compact,
+PatientContextExtractor converts raw FHIR resource lists into a compact,
 token-efficient plain-text string for LLM consumption.
 
 Token budget: 3,000 tokens (cl100k_base / gpt-4o-mini).
 
-Truncation priority order (lowest → highest, i.e. truncated first):
-  CarePlan activities → Encounters → Observations → Allergies →
-  Medications → Conditions → (Demographics is never truncated)
+Truncation priority order, from lowest priority to highest priority:
+  CarePlan activities -> Encounters -> Observations -> Allergies ->
+  Medications -> Conditions -> Demographics is never truncated
 """
 
 from __future__ import annotations
@@ -43,11 +43,11 @@ class PatientContextExtractor:
           - Care Plan
 
         Each section is always present; empty resource lists render as "None".
-        Output is guaranteed to be ≤ 3,000 cl100k_base tokens.
+        Output is guaranteed to be at most 3,000 cl100k_base tokens.
         The input PatientResources is never mutated.
         """
         # Work on shallow copies of every list so we never mutate the caller's data.
-        # Individual dicts are not copied — we only read them, never modify them.
+        # Individual dicts are not copied - we only read them, never modify them.
         conditions = list(resources.conditions)
         medications = list(resources.medications)
         allergies = list(resources.allergies)
@@ -90,7 +90,7 @@ class PatientContextExtractor:
         encounters: list[dict],
         care_plans: list[dict],
     ) -> str:
-        """Build the context string and truncate sections until ≤ TOKEN_BUDGET.
+        """Build the context string and truncate sections until it fits the token budget.
 
         Truncation priority (lowest priority removed first):
           1. CarePlan activities  (drop one activity at a time)
@@ -139,7 +139,7 @@ class PatientContextExtractor:
             elif cond_working:
                 cond_working.pop()
             else:
-                # Only demographics remain — cannot truncate further.
+                # Only demographics remain - cannot truncate further.
                 break
             result = _build()
 
@@ -282,7 +282,7 @@ class PatientContextExtractor:
         gender = patient.get("gender", "Unknown")
         result.append(f"Gender: {gender}")
 
-        # MRN — identifier where type.coding[0].code == "MR"
+        # MRN - identifier where type.coding[0].code == "MR"
         mrn = "Unknown"
         for identifier in patient.get("identifier", []):
             coding_list = identifier.get("type", {}).get("coding", [])
@@ -394,6 +394,6 @@ class PatientContextExtractor:
 
     # Keep the legacy helper name so any existing callers don't break.
     def _extract_care_plan(self, care_plans: list[dict]) -> list[str]:
-        """Legacy wrapper — delegates to _extract_activity_lines."""
+        """Legacy wrapper - delegates to _extract_activity_lines."""
         lines = self._extract_activity_lines(care_plans)
         return lines if lines else ["None"]

@@ -1,5 +1,5 @@
 """
-FHIRClient — HTTP communication with the IRIS FHIR R4 endpoint.
+FHIRClient handles HTTP communication with the IRIS FHIR R4 endpoint.
 
 Handles authentication, resource retrieval, fallback to local bundle,
 and patient listing.
@@ -154,7 +154,7 @@ class FHIRClient:
         if self.is_available():
             # get_resource with empty patient_id fetches all patients
             return self.get_resource("Patient", "")
-        # Server unavailable — parse local fallback bundle
+        # Server unavailable - parse local fallback bundle
         all_resources = self._load_fallback_bundle()
         return [r for r in all_resources if r.get("resourceType") == "Patient"]
 

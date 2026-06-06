@@ -1,1 +1,1 @@
-# Smart Patient Summary Generator — src package
+# Smart Patient Summary Generator src package

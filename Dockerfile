@@ -13,4 +13,4 @@ COPY data/ ./data/
 # Expose Gradio port
 EXPOSE 7860
 
-CMD ["python", "src/app.py"]
+CMD ["python", "-m", "src.start"]

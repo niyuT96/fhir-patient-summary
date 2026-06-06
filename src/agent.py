@@ -1,5 +1,5 @@
 """
-SummaryAgent — orchestrates FHIR data retrieval, context extraction, and
+SummaryAgent coordinates FHIR data retrieval, context extraction, and
 LLM invocation to produce a SummaryResult.
 """
 
@@ -66,7 +66,7 @@ _ROLE_PROMPTS: dict[str, str] = {
 }
 
 # ---------------------------------------------------------------------------
-# Header → key mapping (case-sensitive, must match exactly on their own line)
+# Header - key mapping (case-sensitive, must match exactly on their own line)
 # ---------------------------------------------------------------------------
 _HEADER_MAP: dict[str, str] = {
     "## Current Issues": "current_issues",
@@ -82,8 +82,8 @@ def parse_sections(raw_text: str) -> dict[str, str]:
     ``recent_changes``, and ``risks_and_followup``.  Never raises an
     exception.
 
-    Parsing rules (Requirements 5.1–5.7):
-    - If ``raw_text`` is empty → all three values are empty strings.
+    Parsing rules (Requirements 5.1-5.7):
+    - If ``raw_text`` is empty - all three values are empty strings.
     - Lines that exactly equal a recognised ``## Header`` marker start a new
       section; content lines are accumulated until the next header or EOF.
     - Each section value is stripped of leading/trailing whitespace.
@@ -97,7 +97,7 @@ def parse_sections(raw_text: str) -> dict[str, str]:
         "risks_and_followup": "",
     }
 
-    # Empty input → return all-empty dict immediately (Req 5.4)
+    # Empty input - return all-empty dict immediately (Req 5.4)
     if not raw_text:
         return result
 
@@ -142,9 +142,9 @@ def _fetch_all_fhir_resources(
     fails or yields no results.
 
     Non-Patient resource fetch failures are logged as warnings and the
-    corresponding field is set to an empty list (Requirements 7.1–7.5).
+    corresponding field is set to an empty list (Requirements 7.1-7.5).
     """
-    # Ordered fetch list — (resource_type, extra_params)
+    # Ordered fetch list: (resource_type, extra_params)
     _FETCH_PLAN = [
         ("Patient",            {"_id": patient_id}),
         ("Condition",          {"patient": patient_id, "clinical-status": "active"}),
@@ -163,7 +163,7 @@ def _fetch_all_fhir_resources(
             results[resource_type] = entries
         except (FHIRClientError, FHIRUnavailableError) as exc:
             if resource_type == "Patient":
-                # Patient fetch failure is fatal — return error sentinel
+                # Patient fetch failure is fatal, so return an error sentinel.
                 return _error_result(
                     patient_id=patient_id,
                     error=f"Failed to fetch Patient {patient_id}: {exc}",
@@ -217,14 +217,14 @@ def _utc_now_iso() -> str:
 class SummaryAgent:
     """Orchestrates FHIR retrieval, context extraction, and LLM invocation.
 
-    Requirements: 2.3, 2.4, 4.1–4.5, 6.1–6.7, 7.1–7.5
+    Requirements: 2.3, 2.4, 4.1-4.5, 6.1-6.7, 7.1-7.5
     """
 
     def __init__(
         self,
         fhir_client: "FHIRClient",
         extractor: "PatientContextExtractor",
-        llm_client,  # openai.OpenAI instance — typed loosely to avoid hard dependency
+        llm_client,  # openai.OpenAI instance, typed loosely to avoid a hard dependency
     ) -> None:
         self._fhir = fhir_client
         self._fhir_client = fhir_client  # alias for test compatibility
@@ -235,7 +235,7 @@ class SummaryAgent:
     def generate_summary(self, patient_id: str, role: str) -> SummaryResult:
         """Generate a role-specific clinical summary for *patient_id*.
 
-        Always returns a ``SummaryResult`` — never raises an unhandled
+        Always returns a ``SummaryResult`` and never raises an unhandled
         exception (Requirement 6.1).
         """
         generated_at = _utc_now_iso()
@@ -313,7 +313,7 @@ class SummaryAgent:
                 error=llm_error,
             )
 
-        except Exception as exc:  # noqa: BLE001 — top-level safety net (Req 6.1)
+        except Exception as exc:  # noqa: BLE001 - top-level safety net (Req 6.1)
             logger.exception("Unhandled error in generate_summary: %s", exc)
             return SummaryResult(
                 patient_name="",

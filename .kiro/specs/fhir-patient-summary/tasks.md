@@ -104,15 +104,15 @@ The implementation follows the component order: data models and shared types →
 - [x] 6. Checkpoint — Ensure all PatientContextExtractor and parse_sections tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 7. Implement SummaryAgent
-  - [-] 7.1 Implement role-specific prompts and `generate_summary()` core logic
+- [x] 7. Implement SummaryAgent
+  - [x] 7.1 Implement role-specific prompts and `generate_summary()` core logic
     - Define ED Doctor and Care Manager system prompts exactly as specified in the design document
     - Implement `SummaryAgent.__init__()` accepting `fhir_client`, `extractor`, and `llm_client`
     - Implement the data-source determination: call `fhir_client.is_available()`; if `True` proceed with live fetch and set `data_source="fhir_server"`; if `False` load from local bundle and set `data_source="local_fallback"`
     - Return `SummaryResult` with `error="Unsupported role: {role}"` and empty section fields immediately (without calling LLM) for any role other than `"ED Doctor"` or `"Care Manager"`
     - _Requirements: 2.3, 2.4, 4.1, 4.2, 4.3, 6.6, 6.7_
 
-  - [ ] 7.2 Implement FHIR resource fetching with graceful degradation
+  - [x] 7.2 Implement FHIR resource fetching with graceful degradation
     - Fetch all seven resource types sequentially using the query parameters defined in the FHIR Fetch Algorithm (design §Algorithmic Pseudocode)
     - On `FHIRClientError` or `FHIRUnavailableError` for non-Patient resource types: log a warning with the resource type and error message, set that field to `[]`, and continue fetching remaining types; preserve all previously fetched results
     - If the Patient fetch itself raises an error, return `SummaryResult` with `error="Failed to fetch Patient {id}: {error_message}"` and do not call the LLM
@@ -123,7 +123,7 @@ The implementation follows the component order: data models and shared types →
     - **Property 12: Partial FHIR fetch graceful degradation** — for any non-empty subset of non-Patient resource types configured to return errors, the fetch step must return `PatientResources` where Patient is non-empty, failed types default to `[]`, and successfully fetched types retain their values
     - **Validates: Requirements 7.1, 7.3, 7.4**
 
-  - [~] 7.4 Implement LLM invocation and result assembly
+  - [x] 7.4 Implement LLM invocation and result assembly
     - Call `extractor.extract(resources)` to build the patient context string
     - Invoke OpenAI Chat API with model `gpt-4o-mini`, `temperature=0.3`, `max_tokens=800`, and a two-message payload: `system` message with the role-specific prompt and `user` message with the context string
     - Pass the full response text to `parse_sections()` and populate the three `SummaryResult` section fields
@@ -145,11 +145,11 @@ The implementation follows the component order: data models and shared types →
     - **Property 11: SummaryResult success contract** — for any valid `patient_id` and role, when the LLM call succeeds, the returned `SummaryResult` must have `error=None`, all three section fields non-empty, `patient_id` equal to the input, and `role` equal to the input
     - **Validates: Requirements 6.2, 6.5, 6.6**
 
-- [~] 8. Checkpoint — Ensure all SummaryAgent tests pass
+- [x] 8. Checkpoint — Ensure all SummaryAgent tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 9. Implement GradioUI (`app.py`)
-  - [~] 9.1 Implement UI layout, patient dropdown, and role selection
+- [x] 9. Implement GradioUI (`app.py`)
+  - [x] 9.1 Implement UI layout, patient dropdown, and role selection
     - Replace the existing `ui.py` mock with `app.py`
     - On startup: call `FHIRClient.is_available()`; populate `patient_dropdown` from `FHIRClient.list_patients()` displaying patient ID and name; show green `"FHIR Server"` badge or amber `"Local Fallback"` badge accordingly
     - If `is_available()` returned `False`, display the fallback mode banner above the patient selector
@@ -157,36 +157,36 @@ The implementation follows the component order: data models and shared types →
     - Present a `gr.Radio` with exactly `["ED Doctor", "Care Manager"]`
     - _Requirements: 8.1, 8.2, 8.3, 8.6, 8.10_
 
-  - [~] 9.2 Implement summary generation flow, status bar, and error display
+  - [x] 9.2 Implement summary generation flow, status bar, and error display
     - On Generate button click: validate patient selection (display `"Please select a patient before generating a summary"` in status bar and do not call the agent if none is selected); show `"Generating summary…"` in status bar and disable the Generate button while generation is in progress; re-enable and clear the status bar on completion or failure
     - Call `SummaryAgent.generate_summary()` with the selected patient ID and role; render returned `SummaryResult` sections as formatted Markdown in the summary output panel
     - Display `data_source` as `"Source: FHIR Server"` or `"Source: Local Fallback"` and `generated_at` as a human-readable UTC datetime in a footer below the summary output
     - On any error condition (`SummaryResult.error` non-null, network failures, validation errors): display `"Error: {message}"` in the summary panel without exposing Python stack traces or internal exception details
     - _Requirements: 8.4, 8.5, 8.7, 8.8, 8.9_
 
-- [ ] 10. Implement FHIRLoader (`fhir_loader.py`)
-  - [~] 10.1 Implement `load_bundle()` with idempotency guard and error handling
+- [x] 10. Implement FHIRLoader (`fhir_loader.py`)
+  - [x] 10.1 Implement `load_bundle()` with idempotency guard and error handling
     - Check if `data/loaded-patient-ids.json` exists and is non-empty; if so, return the previously assigned patient IDs from that file without re-posting the bundle
     - Read `data/sample-patient-bundle.json` and POST it as a FHIR R4 transaction bundle to `{base_url}` using HTTP Basic auth with a 30-second timeout
     - On HTTP 200: extract assigned patient IDs from `entry[].response.location` fields, log a success line per resource type showing the count of resources created, and write patient IDs as a JSON array to `data/loaded-patient-ids.json`
     - On non-200 HTTP response, connection error, or timeout: raise `FHIRLoaderError` with the HTTP status code (if available) and response body (if available); for timeout specifically, include a message indicating the timeout
     - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.5_
 
-- [ ] 11. Create synthetic FHIR bundle and Docker Compose configuration
-  - [~] 11.1 Create `data/sample-patient-bundle.json`
+- [x] 11. Create synthetic FHIR bundle and Docker Compose configuration
+  - [x] 11.1 Create `data/sample-patient-bundle.json`
     - Author a valid FHIR R4 transaction bundle (`"type": "transaction"`) with `"request": {"method": "POST", "url": "{ResourceType}"}` entries for each resource
     - Include at minimum: 1 `Patient`, 3 `Condition` (active), 5 `MedicationRequest` (active), 1 `AllergyIntolerance`, 10 `Observation` (lab values + vitals with `effectiveDateTime`), 3 `Encounter` (with `period.start`), 1 `CarePlan` (active with goals and activities)
     - Ensure all resources use synthetic Synthea-style data; no real patient records
     - _Requirements: 2.8, 9.1, 11.1_
 
-  - [~] 11.2 Write `Dockerfile` for the Python app container and update `docker-compose.yml`
+  - [x] 11.2 Write `Dockerfile` for the Python app container and update `docker-compose.yml`
     - Write a `Dockerfile` based on `python:3.11-slim` that installs dependencies from `requirements.txt`, copies source files, and runs `app.py`
     - Add an `EnvironmentError` check at app startup that raises with a descriptive message naming `OPENAI_API_KEY` if it is absent or empty, halting before Gradio launches
     - Update `docker-compose.yml`: define `iris` service (`intersystems/irishealth-community:latest-em`, port `52773:52773`, health check probing `/fhir/r4/metadata` every 5 seconds with 60-second start period and 12 retries) and `app` service (custom image, port `7860:7860`, reads `OPENAI_API_KEY` and `IRIS_PASSWORD` from environment, `depends_on: iris` with `condition: service_healthy`)
     - Ensure no literal secret values appear in `docker-compose.yml` or `Dockerfile`
     - _Requirements: 10.1, 10.2, 10.3, 10.4, 10.5, 10.7, 10.8_
 
-- [~] 12. Final checkpoint — Ensure all tests pass
+- [x] 12. Final checkpoint — Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
 ## Notes

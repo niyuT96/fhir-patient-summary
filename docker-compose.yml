@@ -26,11 +26,13 @@ services:
       IRIS_PASSWORD: ${IRIS_PASSWORD}
       IRIS_BASE_URL: http://iris:52773/fhir/r4
       IRIS_USERNAME: superuser
+      FHIR_FALLBACK_PATH: data/sample-patient-bundle.json
+      LOAD_SAMPLE_BUNDLE: "true"
     depends_on:
       iris:
-        condition: service_healthy
-    # If IRIS is unhealthy the app still starts — it falls back to local bundle
-    # automatically because FHIRClient.is_available() will return False.
+        condition: service_started
+    # If IRIS is unhealthy, the app still starts and falls back to the local
+    # bundle because FHIRClient.is_available() returns False.
 
 volumes:
   irishealth-durable:
