@@ -264,19 +264,6 @@ generates clinician-ready, role-specific patient summaries for emergency
 doctors and care managers.
 ```
 
-## Submission Checklist
-
-- [ ] Repository is public on GitHub or GitLab.
-- [ ] README is in English.
-- [ ] README contains installation steps.
-- [ ] README contains team members and Developer Community profile links.
-- [ ] README contains a video demo link or detailed demo description.
-- [ ] No real patient data is included.
-- [ ] No API keys, passwords, or tokens are committed.
-- [ ] Application runs locally.
-- [ ] Application can use IRIS FHIR Server or documented local fallback.
-- [ ] Open Exchange package is published.
-- [ ] Contest submission is completed before the deadline.
 
 ## Data References
 
