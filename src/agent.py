@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from src.exceptions import FHIRClientError, FHIRUnavailableError
-from src.models import PatientResources, SummaryResult
+from src.models import PatientResources, SourceSection, SummaryResult
 
 if TYPE_CHECKING:
     from src.context_extractor import PatientContextExtractor
@@ -390,3 +390,161 @@ class SummaryAgent:
         family = first.get("family", "")
         parts = [p for p in [given, family] if p]
         return " ".join(parts) if parts else "Unknown"
+
+    # ---------------------------------------------------------------------- #
+    # Source-section builder                                                  #
+    # ---------------------------------------------------------------------- #
+
+    def _build_source_sections(self, resources: PatientResources) -> list[SourceSection]:
+        """Convert PatientResources into SourceSection list for the UI source panel.
+
+        Re-uses the same formatting helpers as PatientContextExtractor so the
+        values shown in the panel exactly match what was sent to the LLM.
+        """
+        sections: list[SourceSection] = []
+
+        # --- Active Conditions ---
+        cond_items = [
+            self._extractor._format_condition(c).lstrip("- ")
+            for c in resources.conditions
+        ]
+        sections.append(SourceSection(
+            label=f"Active Conditions ({len(cond_items)})",
+            items=cond_items if cond_items else ["None"],
+        ))
+
+        # --- Active Medications ---
+        med_items = [
+            self._extractor._format_medication(m).lstrip("- ")
+            for m in resources.medications
+        ]
+        sections.append(SourceSection(
+            label=f"Active Medications ({len(med_items)})",
+            items=med_items if med_items else ["None"],
+        ))
+
+        # --- Allergies ---
+        allergy_items = [
+            self._extractor._format_allergy(a).lstrip("- ")
+            for a in resources.allergies
+        ]
+        sections.append(SourceSection(
+            label=f"Allergies ({len(allergy_items)})",
+            items=allergy_items if allergy_items else ["None"],
+        ))
+
+        # --- Recent Observations (newest first, up to 10) ---
+        sorted_obs = sorted(
+            resources.observations,
+            key=lambda o: o.get("effectiveDateTime", ""),
+            reverse=True,
+        )[:10]
+        obs_items = [
+            self._extractor._format_observation(o).lstrip("- ")
+            for o in sorted_obs
+        ]
+        obs_items = [i for i in obs_items if i]  # drop blanks
+        sections.append(SourceSection(
+            label=f"Recent Observations ({len(obs_items)})",
+            items=obs_items if obs_items else ["None"],
+        ))
+
+        # --- Recent Encounters (newest first, up to 3) ---
+        sorted_enc = sorted(
+            resources.encounters,
+            key=lambda e: e.get("period", {}).get("start", ""),
+            reverse=True,
+        )[:3]
+        enc_items = [
+            self._extractor._format_encounter(e).lstrip("- ")
+            for e in sorted_enc
+        ]
+        enc_items = [i for i in enc_items if i]
+        sections.append(SourceSection(
+            label=f"Recent Encounters ({len(enc_items)})",
+            items=enc_items if enc_items else ["None"],
+        ))
+
+        # --- Care Plan ---
+        activity_lines = self._extractor._extract_activity_lines(resources.care_plans)
+        cp_items = [line.lstrip("- Activity: ") for line in activity_lines]
+        sections.append(SourceSection(
+            label=f"Care Plan ({len(cp_items)} activities)",
+            items=cp_items if cp_items else ["None"],
+        ))
+
+        return sections
+
+    # ---------------------------------------------------------------------- #
+    # Streaming summary generator                                             #
+    # ---------------------------------------------------------------------- #
+
+    def generate_summary_stream(self, patient_id: str, role: str):
+        """Streaming variant of generate_summary.
+
+        Yields tuples of (partial_markdown: str, source_sections: list[SourceSection] | None).
+        - While the LLM is streaming, source_sections is None.
+        - The final yield carries the complete source_sections list (or [] on error).
+        Never raises; errors are surfaced as a final plain-text yield with source_sections=[].
+        """
+        generated_at = _utc_now_iso()
+
+        # --- Role validation ---
+        if role not in _ROLE_PROMPTS:
+            yield f"**Error:** Unsupported role: {role}", []
+            return
+
+        # --- Data fetch (same logic as generate_summary) ---
+        try:
+            if self._fhir.is_available():
+                data_source = "fhir_server"
+                fetch_result = _fetch_all_fhir_resources(self._fhir, patient_id)
+                if isinstance(fetch_result, SummaryResult):
+                    yield f"**Error:** {fetch_result.error}", []
+                    return
+                resources: PatientResources = fetch_result
+            else:
+                data_source = "local_fallback"
+                resources = self._load_fallback_resources(patient_id)
+                if isinstance(resources, SummaryResult):
+                    yield f"**Error:** {resources.error}", []
+                    return
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Data fetch error in generate_summary_stream: %s", exc)
+            yield f"**Error:** {exc}", []
+            return
+
+        # Build source sections immediately so the UI can show them as soon
+        # as the LLM starts streaming (source panel doesn't depend on LLM).
+        source_sections = self._build_source_sections(resources)
+
+        context_text = self._extractor.extract(resources)
+        system_prompt = _ROLE_PROMPTS[role]
+
+        # --- Stream from LLM ---
+        try:
+            stream = self._llm.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": context_text},
+                ],
+                temperature=0.3,
+                max_tokens=800,
+                stream=True,
+            )
+
+            accumulated = ""
+            for chunk in stream:
+                delta = chunk.choices[0].delta.content or ""
+                if delta:
+                    accumulated += delta
+                    # Yield partial markdown; source_sections not ready yet
+                    yield accumulated, None
+
+            # Final yield with source sections
+            yield accumulated, source_sections
+
+        except Exception as llm_exc:  # noqa: BLE001
+            logger.exception("LLM streaming error: %s", llm_exc)
+            yield f"**Error:** {llm_exc}", []

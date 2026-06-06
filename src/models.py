@@ -24,12 +24,17 @@ class PatientResources:
 
 
 @dataclass
-class ResourceSourceInfo:
-    """Counts and labels for a single FHIR resource type used in a summary."""
+class SourceSection:
+    """One labelled group of source data items shown in the UI.
 
-    resource_type: str   # e.g. "Condition", "MedicationRequest"
-    label: str           # Human-readable label, e.g. "Active Conditions"
-    count: int           # Number of entries included in the context
+    Example:
+        label = "Recent Observations"
+        items = ["Blood Pressure: 120/80 mmHg (2026-01-15)",
+                 "Heart Rate: 72 /min (2026-01-15)"]
+    """
+
+    label: str          # Display heading, e.g. "Active Conditions"
+    items: list[str]    # Formatted text lines extracted from FHIR resources
 
 
 @dataclass
@@ -45,4 +50,6 @@ class SummaryResult:
     data_source: Literal["fhir_server", "local_fallback"]
     generated_at: str  # ISO 8601 UTC timestamp, e.g. "2026-06-05T14:30:00Z"
     error: str | None = None
-    sources: list[ResourceSourceInfo] = field(default_factory=list)
+    # Structured source data shown in the "Data Sources" panel in the UI.
+    # Each entry is one collapsible section (e.g. Conditions, Medications …).
+    source_sections: list[SourceSection] = field(default_factory=list)

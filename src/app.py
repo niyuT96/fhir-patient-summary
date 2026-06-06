@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 from datetime import date, datetime, timezone
+from typing import Generator
 
 import gradio as gr
 from dotenv import load_dotenv
@@ -16,7 +17,7 @@ from openai import OpenAI
 from src.agent import SummaryAgent
 from src.context_extractor import PatientContextExtractor
 from src.fhir_client import FHIRClient
-from src.models import SummaryResult
+from src.models import SourceSection, SummaryResult
 
 load_dotenv()
 
@@ -97,6 +98,46 @@ def _patient_label(patient: dict) -> str:
     return f"{name} ({age})"
 
 
+def _build_sources_html(sections: list[SourceSection], data_source: str) -> str:
+    """Render a SourceSection list as a styled HTML block for the UI.
+
+    Each section becomes a labelled group with its items listed below.
+    The data_source badge (FHIR Server / Local Fallback) appears at the top.
+    """
+    if not sections:
+        return ""
+
+    badge_color = "#16a34a" if data_source == "fhir_server" else "#d97706"
+    badge_label = "FHIR Server" if data_source == "fhir_server" else "Local Fallback"
+
+    lines: list[str] = [
+        '<div style="font-size:0.88em;line-height:1.6;border:1px solid #e5e7eb;'
+        'border-radius:8px;padding:12px 16px;background:#f9fafb;">',
+        f'<div style="margin-bottom:10px;">'
+        f'<span style="background:{badge_color};color:#fff;padding:2px 9px;'
+        f'border-radius:10px;font-size:0.82em;font-weight:600;">数据来源: {badge_label}</span>'
+        f'</div>',
+    ]
+
+    for section in sections:
+        # Skip sections that are just ["None"] to keep the panel clean
+        if section.items == ["None"]:
+            continue
+
+        lines.append(
+            f'<details style="margin-bottom:6px;">'
+            f'<summary style="cursor:pointer;font-weight:600;color:#374151;'
+            f'padding:3px 0;">{section.label}</summary>'
+            f'<ul style="margin:4px 0 4px 18px;padding:0;color:#4b5563;">'
+        )
+        for item in section.items:
+            lines.append(f"<li>{item}</li>")
+        lines.append("</ul></details>")
+
+    lines.append("</div>")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Startup: probe server and build patient list
 # ---------------------------------------------------------------------------
@@ -116,43 +157,71 @@ _patient_id_map: dict[str, str] = {
     _patient_label(patient): patient.get("id", "") for patient in _patients
 }
 
+_data_source_label = "fhir_server" if _server_available else "local_fallback"
 
-def on_generate(patient_label: str | None, role: str):
-    """Generate and render a summary for the selected patient and role."""
+
+def on_generate(
+    patient_label: str | None,
+    role: str,
+) -> Generator[tuple[str, str, str, str, gr.update], None, None]:
+    """Streaming generator for summary generation.
+
+    Yields (summary_markdown, status, footer_html, sources_html, btn_update)
+    on each LLM chunk.  The sources panel is populated on the final yield.
+    """
     if not patient_label:
-        return (
+        yield (
             "",
-            "Please select a patient before generating a summary",
+            "请先选择一个病人",
+            "",
             "",
             gr.update(interactive=True),
         )
+        return
 
     patient_id = _patient_id_map.get(patient_label, patient_label)
-    result: SummaryResult = _agent.generate_summary(patient_id, role)
 
-    if result.error:
-        summary_markdown = f"**Error:** {result.error}"
-    else:
-        summary_markdown = (
-            f"## Current Issues\n{result.current_issues}\n\n"
-            f"## Recent Changes\n{result.recent_changes}\n\n"
-            f"## Risks and Follow-up\n{result.risks_and_followup}"
+    # Determine data source for the footer/badge (same logic as agent)
+    data_source = _data_source_label
+
+    accumulated_sources: list[SourceSection] = []
+
+    for partial_text, source_sections in _agent.generate_summary_stream(patient_id, role):
+        is_final = source_sections is not None
+
+        if is_final:
+            accumulated_sources = source_sections or []
+
+        sources_html = (
+            _build_sources_html(accumulated_sources, data_source)
+            if is_final
+            else ""
         )
 
-    source_label = (
-        "Source: FHIR Server"
-        if result.data_source == "fhir_server"
-        else "Source: Local Fallback"
-    )
-    footer_html = (
-        f'<p style="font-size:0.8em;color:#6b7280;">'
-        f"{source_label} &nbsp;|&nbsp; Generated: {_format_generated_at(result.generated_at)}"
-        "</p>"
-    )
+        footer_html = ""
+        if is_final:
+            now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            source_label = (
+                "Source: FHIR Server" if data_source == "fhir_server" else "Source: Local Fallback"
+            )
+            footer_html = (
+                f'<p style="font-size:0.8em;color:#6b7280;">'
+                f"{source_label} &nbsp;|&nbsp; Generated: {_format_generated_at(now_iso)}"
+                "</p>"
+            )
 
-    return summary_markdown, "", footer_html, gr.update(interactive=True)
+        yield (
+            partial_text,
+            "" if is_final else "正在生成摘要...",
+            footer_html,
+            sources_html,
+            gr.update(interactive=is_final),
+        )
 
 
+# ---------------------------------------------------------------------------
+# Gradio UI layout
+# ---------------------------------------------------------------------------
 with gr.Blocks(title="Smart Patient Summary Generator") as demo:
     gr.Markdown("# Smart Patient Summary Generator")
 
@@ -197,15 +266,20 @@ with gr.Blocks(title="Smart Patient Summary Generator") as demo:
             summary_output = gr.Markdown(label="Summary", value="")
             footer = gr.HTML(value="")
 
+            # Data sources panel — collapsed by default, expands to show
+            # the exact FHIR values that were fed to the LLM.
+            with gr.Accordion("📋 参考数据来源", open=False):
+                sources_panel = gr.HTML(value="")
+
     generate_btn.click(
-        fn=lambda: (gr.update(interactive=False), "Generating summary..."),
+        fn=lambda: (gr.update(interactive=False), "正在生成摘要..."),
         inputs=[],
         outputs=[generate_btn, status_bar],
         queue=False,
     ).then(
         fn=on_generate,
         inputs=[patient_dropdown, role_radio],
-        outputs=[summary_output, status_bar, footer, generate_btn],
+        outputs=[summary_output, status_bar, footer, sources_panel, generate_btn],
     )
 
 
