@@ -357,6 +357,32 @@ class TestLoadFallbackBundle:
         finally:
             os.unlink(tmp_path)
 
+    def test_parses_bundle_directory_in_filename_order(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            first_bundle = _bundle_with([
+                {"resource": {"resourceType": "Patient", "id": "p1"}},
+            ])
+            second_bundle = _bundle_with([
+                {"resource": {"resourceType": "Patient", "id": "p2"}},
+                {"resource": {"resourceType": "Condition", "id": "c2"}},
+            ])
+
+            with open(os.path.join(tmp_dir, "001.json"), "w", encoding="utf-8") as fh:
+                json.dump(first_bundle, fh)
+            with open(os.path.join(tmp_dir, "002.json"), "w", encoding="utf-8") as fh:
+                json.dump(second_bundle, fh)
+
+            client = make_client(fallback_path=tmp_dir)
+            result = client._load_fallback_bundle()
+
+            assert [resource["id"] for resource in result] == ["p1", "p2", "c2"]
+
+    def test_raises_runtime_error_for_empty_bundle_directory(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            client = make_client(fallback_path=tmp_dir)
+            with pytest.raises(RuntimeError, match="No JSON fallback bundles"):
+                client._load_fallback_bundle()
+
 
 class TestListPatients:
     def test_uses_live_server_when_available(self):
@@ -418,6 +444,27 @@ class TestListPatients:
             assert result[0]["resourceType"] == "Patient"
         finally:
             os.unlink(tmp_path)
+
+    def test_fallback_directory_lists_patients_from_all_bundles(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            bundle_one = _bundle_with([
+                {"resource": {"resourceType": "Patient", "id": "p1"}},
+                {"resource": {"resourceType": "Condition", "id": "c1"}},
+            ])
+            bundle_two = _bundle_with([
+                {"resource": {"resourceType": "Patient", "id": "p2"}},
+            ])
+
+            with open(os.path.join(tmp_dir, "patient-a.json"), "w", encoding="utf-8") as fh:
+                json.dump(bundle_one, fh)
+            with open(os.path.join(tmp_dir, "patient-b.json"), "w", encoding="utf-8") as fh:
+                json.dump(bundle_two, fh)
+
+            client = make_client(fallback_path=tmp_dir)
+            with patch.object(client, "is_available", return_value=False):
+                result = client.list_patients()
+
+            assert [patient["id"] for patient in result] == ["p1", "p2"]
 
     def test_list_patients_live_sends_no_id_filter(self):
         """When listing all patients, no _id param should be sent."""

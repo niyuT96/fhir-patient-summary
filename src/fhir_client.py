@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 
 import requests
 from requests.exceptions import ConnectionError, Timeout
@@ -57,8 +58,9 @@ class FHIRClient:
                            ``"http://localhost:52773/fhir/r4"``.
             username:      HTTP Basic auth username.
             password:      HTTP Basic auth password.
-            fallback_path: Path to the local FHIR bundle JSON file used when
-                           the server is unavailable.
+            fallback_path: Path to a local FHIR bundle JSON file or a directory
+                           containing FHIR bundle JSON files used when the
+                           server is unavailable.
         """
         # Normalise: strip any trailing slash so URL concatenation is uniform
         self._base_url = base_url.rstrip("/")
@@ -188,28 +190,46 @@ class FHIRClient:
         return results
 
     def _load_fallback_bundle(self) -> list[dict]:
-        """Read and parse the local fallback bundle file.
+        """Read and parse local fallback bundle file(s).
 
         Returns a flat list of all resource dicts found in the bundle
         (entries without a ``resource`` key are silently skipped).
 
         Raises:
-            RuntimeError: If the file is missing or contains invalid JSON,
+            RuntimeError: If the path is missing or contains invalid JSON,
                           including the path and the reason.
         """
+        path = Path(self._fallback_path)
+        if path.is_dir():
+            json_files = sorted(path.glob("*.json"))
+            if not json_files:
+                raise RuntimeError(
+                    f"No JSON fallback bundles found in directory '{self._fallback_path}'"
+                )
+
+            results: list[dict] = []
+            for json_file in json_files:
+                results.extend(self._load_fallback_bundle_file(json_file, str(json_file)))
+            return results
+
+        return self._load_fallback_bundle_file(path, self._fallback_path)
+
+    @staticmethod
+    def _load_fallback_bundle_file(path: Path, display_path: str) -> list[dict]:
+        """Read one FHIR JSON bundle and return its entry resources."""
         try:
-            with open(self._fallback_path, "r", encoding="utf-8") as fh:
+            with open(path, "r", encoding="utf-8") as fh:
                 raw = fh.read()
         except OSError as exc:
             raise RuntimeError(
-                f"Cannot read fallback bundle at '{self._fallback_path}': {exc}"
+                f"Cannot read fallback bundle at '{display_path}': {exc}"
             ) from exc
 
         try:
             bundle = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise RuntimeError(
-                f"Invalid JSON in fallback bundle at '{self._fallback_path}': {exc}"
+                f"Invalid JSON in fallback bundle at '{display_path}': {exc}"
             ) from exc
 
         results: list[dict] = []

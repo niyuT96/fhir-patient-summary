@@ -26,8 +26,8 @@ services:
       IRIS_PASSWORD: ${IRIS_PASSWORD}
       IRIS_BASE_URL: http://iris:52773/fhir/r4
       IRIS_USERNAME: superuser
-      FHIR_FALLBACK_PATH: data/sample-patient-bundle.json
-      LOAD_SAMPLE_BUNDLE: "true"
+      FHIR_FALLBACK_PATH: ${FHIR_FALLBACK_PATH:-data/sample-patient-bundle.json}
+      LOAD_SAMPLE_BUNDLE: ${LOAD_SAMPLE_BUNDLE:-true}
     depends_on:
       iris:
         condition: service_started

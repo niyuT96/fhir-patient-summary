@@ -1,45 +1,111 @@
-# IRIS Health App
+# Smart Patient Summary Generator
 
-Development environment for InterSystems IRIS for Health using Docker Compose.
+InterSystems IRIS for Health FHIR demo app that reads FHIR R4 patient data,
+builds a compact clinical context, and uses an AI agent to generate
+role-specific summaries for:
+
+- ED Doctor
+- Care Manager
 
 ## Start
 
+Create a local environment file:
+
 ```powershell
-docker compose up -d
+Copy-Item .env.example .env
+notepad .env
 ```
 
----
+Set at least:
+
+```env
+OPENAI_API_KEY=your-openai-api-key-here
+IRIS_PASSWORD=SYS
+```
+
+Run locally:
+
+```powershell
+python -m src
+```
+
+Or run with Docker:
+
+```powershell
+docker compose up --build
+```
+
+The UI is available at:
+
+```text
+http://localhost:7860
+```
 
 ## Sample Data
 
-The file `data/sample-patient-bundle.json` contains a synthetic FHIR R4 transaction bundle used for local development and fallback mode. **No real patient data is included.** All records are fully synthetic and created solely for demonstration purposes.
+The app supports both local fallback data and IRIS FHIR Server data.
 
-### Data Format
+Local fallback can point to either:
 
-The bundle follows the FHIR R4 transaction format (`"type": "transaction"`) and includes at minimum:
+- One FHIR Bundle JSON file
+- One directory containing multiple `*.json` FHIR Bundle files
 
-| Resource Type | Count |
+Current recommended setting:
+
+```env
+FHIR_FALLBACK_PATH=data
+```
+
+With this setting, the app reads every JSON file directly under `data/`. If you
+download a repository that stores one patient per JSON file in a `samples`
+folder, either copy those JSON files into `data/` or copy the folder to
+`data/samples/` and set:
+
+```env
+FHIR_FALLBACK_PATH=data/samples
+```
+
+Each JSON file should be a FHIR Bundle. The code reads resources from:
+
+```text
+entry[].resource
+```
+
+When IRIS is unavailable, the app uses local fallback data and lists all
+`Patient` resources found. When IRIS is available and `LOAD_SAMPLE_BUNDLE=true`,
+startup attempts to POST each JSON bundle into the IRIS FHIR endpoint.
+
+## Data Flow
+
+1. `src.start` checks whether the IRIS FHIR endpoint is available.
+2. If IRIS is available, `src.fhir_loader` attempts to load local JSON bundles
+   into IRIS.
+3. `src.fhir_client` lists patients from IRIS if available, otherwise from the
+   local fallback path.
+4. `src.context_extractor` converts FHIR resources into a compact patient
+   context.
+5. `src.agent` sends the selected role prompt plus patient context to OpenAI.
+6. `src.app` renders the selected patient, role controls, generated summary,
+   and source mode in the Gradio UI.
+
+## Configuration
+
+Important environment variables:
+
+| Variable | Purpose |
 |---|---|
-| Patient | 1 |
-| Condition | ≥ 3 (active) |
-| MedicationRequest | ≥ 5 (active) |
-| AllergyIntolerance | ≥ 1 |
-| Observation | ≥ 10 (labs + vitals) |
-| Encounter | ≥ 3 |
-| CarePlan | ≥ 1 (active, with goals and activities) |
+| `OPENAI_API_KEY` | Required. Used by the OpenAI client. |
+| `IRIS_BASE_URL` | IRIS FHIR R4 endpoint. |
+| `IRIS_USERNAME` | IRIS basic-auth username. |
+| `IRIS_PASSWORD` | IRIS basic-auth password. |
+| `FHIR_FALLBACK_PATH` | File or directory used when IRIS is unavailable. |
+| `LOAD_SAMPLE_BUNDLE` | Whether startup should POST local bundles into IRIS. |
 
-### References
+## Data References
 
-The synthetic patient data is modelled after the Synthea-style bundles provided in the following repositories:
-
-- **InterSystems FHIR Sample Data**
+- InterSystems FHIR sample data:
   https://github.com/intersystems/samples-FHIR-resource-repository
-  Official InterSystems sample FHIR R4 bundles used as a structural reference for resource shape and field conventions.
-
-- **Synthea — Synthetic Patient Population Simulator**
+- Synthea synthetic patient population simulator:
   https://github.com/synthetichealth/synthea
-  Open-source tool that generates realistic but entirely fictional patient records in FHIR R4 format.
-
-- **FHIR R4 Specification**
+- FHIR R4 specification:
   https://hl7.org/fhir/R4/
-  Normative standard defining the resource types, field names, and bundle transaction format used throughout this project.

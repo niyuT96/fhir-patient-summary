@@ -24,6 +24,15 @@ class PatientResources:
 
 
 @dataclass
+class ResourceSourceInfo:
+    """Counts and labels for a single FHIR resource type used in a summary."""
+
+    resource_type: str   # e.g. "Condition", "MedicationRequest"
+    label: str           # Human-readable label, e.g. "Active Conditions"
+    count: int           # Number of entries included in the context
+
+
+@dataclass
 class SummaryResult:
     """Holds the three summary sections, metadata, and an optional error field."""
 
@@ -36,3 +45,4 @@ class SummaryResult:
     data_source: Literal["fhir_server", "local_fallback"]
     generated_at: str  # ISO 8601 UTC timestamp, e.g. "2026-06-05T14:30:00Z"
     error: str | None = None
+    sources: list[ResourceSourceInfo] = field(default_factory=list)

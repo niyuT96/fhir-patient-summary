@@ -11,6 +11,7 @@ import json
 import logging
 import os
 from collections import defaultdict
+from pathlib import Path
 
 import requests
 from requests.exceptions import ConnectionError, Timeout
@@ -28,7 +29,7 @@ def load_bundle(
     username: str,
     password: str,
 ) -> list[str]:
-    """POST the local FHIR bundle to the IRIS FHIR server.
+    """POST local FHIR bundle file(s) to the IRIS FHIR server.
 
     Idempotency guard: if ``data/loaded-patient-ids.json`` already exists
     and is non-empty, return the previously assigned patient IDs without
@@ -37,7 +38,8 @@ def load_bundle(
     Args:
         fhir_base_url: Base URL of the FHIR R4 server (e.g.
                        ``"http://localhost:52773/fhir/r4"``).
-        bundle_path:   Path to the local ``sample-patient-bundle.json`` file.
+        bundle_path:   Path to a local FHIR bundle JSON file or a directory
+                       containing FHIR bundle JSON files.
         username:      HTTP Basic auth username.
         password:      HTTP Basic auth password.
 
@@ -61,12 +63,53 @@ def load_bundle(
         except (json.JSONDecodeError, OSError):
             pass  # fall through and re-load if file is corrupt / empty
 
-    # --- Read bundle file ---
-    with open(bundle_path, "r", encoding="utf-8") as fh:
+    bundle_files = _resolve_bundle_files(bundle_path)
+
+    url = fhir_base_url.rstrip("/")
+    all_patient_ids: list[str] = []
+
+    for bundle_file in bundle_files:
+        patient_ids = _post_bundle_file(
+            url=url,
+            bundle_file=bundle_file,
+            username=username,
+            password=password,
+        )
+        all_patient_ids.extend(patient_ids)
+
+    os.makedirs(os.path.dirname(_IDEMPOTENCY_FILE), exist_ok=True)
+    with open(_IDEMPOTENCY_FILE, "w", encoding="utf-8") as fh:
+        json.dump(all_patient_ids, fh)
+
+    logger.info("Bundle loading complete. Patient IDs: %s", all_patient_ids)
+    return all_patient_ids
+
+
+def _resolve_bundle_files(bundle_path: str) -> list[Path]:
+    """Return one or more JSON bundle files from a file path or directory path."""
+    path = Path(bundle_path)
+    if path.is_dir():
+        bundle_files = sorted(path.glob("*.json"))
+        if not bundle_files:
+            raise FHIRLoaderError(f"No JSON bundle files found in directory: {bundle_path}")
+        return bundle_files
+
+    if not path.exists():
+        raise FHIRLoaderError(f"FHIR bundle path does not exist: {bundle_path}")
+
+    return [path]
+
+
+def _post_bundle_file(
+    url: str,
+    bundle_file: Path,
+    username: str,
+    password: str,
+) -> list[str]:
+    """POST a single FHIR transaction bundle and return assigned patient IDs."""
+    with open(bundle_file, "r", encoding="utf-8") as fh:
         bundle_data = json.load(fh)
 
-    # --- POST transaction bundle (Req 9.1) ---
-    url = fhir_base_url.rstrip("/")
     try:
         response = requests.post(
             url,
@@ -77,17 +120,17 @@ def load_bundle(
         )
     except Timeout as exc:
         raise FHIRLoaderError(
-            f"POST to {url} timed out after 30 seconds: {exc}"
+            f"POST of {bundle_file} to {url} timed out after 30 seconds: {exc}"
         ) from exc
     except ConnectionError as exc:
         raise FHIRLoaderError(
-            f"Connection error while POSTing bundle to {url}: {exc}"
+            f"Connection error while POSTing {bundle_file} to {url}: {exc}"
         ) from exc
 
     # --- Handle non-200 (Req 9.3) ---
     if response.status_code != 200:
         raise FHIRLoaderError(
-            f"FHIR server returned HTTP {response.status_code} when loading bundle. "
+            f"FHIR server returned HTTP {response.status_code} when loading {bundle_file}. "
             f"Body: {response.text[:500]}"
         )
 
@@ -112,10 +155,5 @@ def load_bundle(
     for rtype, count in sorted(resource_counts.items()):
         logger.info("Loaded %d %s resource(s).", count, rtype)
 
-    # --- Persist patient IDs (Req 9.2) ---
-    os.makedirs(os.path.dirname(_IDEMPOTENCY_FILE), exist_ok=True)
-    with open(_IDEMPOTENCY_FILE, "w", encoding="utf-8") as fh:
-        json.dump(patient_ids, fh)
-
-    logger.info("Bundle loaded successfully. Patient IDs: %s", patient_ids)
+    logger.info("%s loaded successfully. Patient IDs: %s", bundle_file, patient_ids)
     return patient_ids

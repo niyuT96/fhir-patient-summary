@@ -1,14 +1,13 @@
 """
 Gradio UI for patient selection, role selection, and summary display.
 
-Replaces the root-level ui.py mock.
 Requirements: 8.1-8.10, 10.4
 """
 
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import gradio as gr
 from dotenv import load_dotenv
@@ -38,7 +37,7 @@ _fhir_client = FHIRClient(
     base_url=os.environ.get("IRIS_BASE_URL", "http://iris:52773/fhir/r4"),
     username=os.environ.get("IRIS_USERNAME", "superuser"),
     password=os.environ.get("IRIS_PASSWORD", "SYS"),
-    fallback_path=os.environ.get("FHIR_FALLBACK_PATH", "data/sample-patient-bundle.json"),
+    fallback_path=os.environ.get("FHIR_FALLBACK_PATH", "data"),
 )
 _extractor = PatientContextExtractor()
 _llm_client = OpenAI(api_key=_api_key)
@@ -58,9 +57,8 @@ def _format_generated_at(iso_str: str) -> str:
         return iso_str
 
 
-def _patient_label(patient: dict) -> str:
-    """Build a dropdown label like 'patient-001 - Jane Doe'."""
-    patient_id = patient.get("id", "unknown")
+def _patient_name(patient: dict) -> str:
+    """Extract the best available patient display name."""
     names = patient.get("name", [])
     if names:
         first_name = names[0]
@@ -68,8 +66,35 @@ def _patient_label(patient: dict) -> str:
             " ".join(first_name.get("given", []) + [first_name.get("family", "")]).strip()
         )
         if name:
-            return f"{patient_id} - {name}"
-    return patient_id
+            return name
+    return "Unknown patient"
+
+
+def _patient_age(patient: dict, today: date | None = None) -> int | None:
+    """Calculate age in years from the FHIR Patient.birthDate field."""
+    birth_date = patient.get("birthDate")
+    if not birth_date:
+        return None
+
+    try:
+        born = date.fromisoformat(birth_date)
+    except ValueError:
+        return None
+
+    today = today or date.today()
+    age = today.year - born.year
+    if (today.month, today.day) < (born.month, born.day):
+        age -= 1
+    return age
+
+
+def _patient_label(patient: dict) -> str:
+    """Build a dropdown label using only patient name and age."""
+    name = _patient_name(patient)
+    age = _patient_age(patient)
+    if age is None:
+        return f"{name} (age unknown)"
+    return f"{name} ({age})"
 
 
 # ---------------------------------------------------------------------------
@@ -147,7 +172,7 @@ with gr.Blocks(title="Smart Patient Summary Generator") as demo:
         with gr.Column(scale=1):
             patient_dropdown = gr.Dropdown(
                 choices=_patient_choices if _patient_choices else ["No patients available"],
-                label="Patient",
+                label="Patient (Age)",
                 value=None,
                 interactive=bool(_patient_choices),
             )
