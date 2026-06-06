@@ -2,7 +2,7 @@
 Unit tests for SummaryAgent task 7.1:
   - Role-specific prompts (module-level constants)
   - SummaryAgent.__init__()
-  - generate_summary() role validation (unsupported role → immediate error result)
+  - generate_summary() role validation (unsupported role -> immediate error result)
   - generate_summary() data-source determination via fhir_client.is_available()
 """
 
@@ -93,7 +93,7 @@ class TestSummaryAgentInit:
 
 
 # ---------------------------------------------------------------------------
-# Role validation — unsupported role returns error result immediately
+# Role validation - unsupported role returns error result immediately
 # ---------------------------------------------------------------------------
 
 class TestRoleValidation:
@@ -147,7 +147,7 @@ class TestRoleValidation:
     def test_valid_roles_proceed_past_validation(self, good_role):
         """Valid roles should NOT return the 'Unsupported role' error."""
         agent, _, _, _ = _make_agent()
-        # _fetch_resources raises NotImplementedError — that's expected here;
+        # _fetch_resources raises NotImplementedError - that's expected here;
         # we just verify the role error is NOT returned.
         result = agent.generate_summary("p1", good_role)
         # Either error is None or it's something other than "Unsupported role: ..."

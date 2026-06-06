@@ -3,7 +3,7 @@ Unit tests for PatientContextExtractor (task 5.1).
 
 Covers:
 - Demographics extraction: name (text / given+family fallback), DOB, gender, MRN
-- Condition formatting: code.text → code.coding[0].display → "Unknown condition"
+- Condition formatting: code.text -> code.coding[0].display -> "Unknown condition"
 - Medication formatting: drug name + dosage; dosage omitted when absent
 - Allergy formatting: substance, criticality, reaction; absent fields omitted
 - Empty resource lists render as "None" section values

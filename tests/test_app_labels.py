@@ -2,6 +2,8 @@ import importlib
 from datetime import date
 from unittest.mock import MagicMock, patch
 
+from src.models import SourceSection
+
 
 def _load_app_module(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
@@ -46,3 +48,21 @@ def test_patient_label_handles_missing_birth_date(monkeypatch):
     patient = {"name": [{"text": "Jane Doe"}]}
 
     assert app._patient_label(patient) == "Jane Doe (age unknown)"
+
+
+def test_sources_html_keeps_hidden_items_expandable(monkeypatch):
+    app = _load_app_module(monkeypatch)
+    html = app._build_sources_html(
+        [
+            SourceSection(
+                label="Active Conditions (4)",
+                items=["A", "B", "C"],
+                hidden_items=["D"],
+            )
+        ],
+        "local_fallback",
+    )
+
+    assert "Show 1 more" in html
+    assert "<li>D</li>" in html
+    assert "...and" not in html

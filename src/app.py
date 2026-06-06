@@ -17,7 +17,7 @@ from openai import OpenAI
 from src.agent import SummaryAgent
 from src.context_extractor import PatientContextExtractor
 from src.fhir_client import FHIRClient
-from src.models import SourceSection, SummaryResult
+from src.models import SourceSection
 
 load_dotenv()
 
@@ -99,11 +99,7 @@ def _patient_label(patient: dict) -> str:
 
 
 def _build_sources_html(sections: list[SourceSection], data_source: str) -> str:
-    """Render a SourceSection list as a styled HTML block for the UI.
-
-    Each section becomes a labelled group with its items listed below.
-    The data_source badge (FHIR Server / Local Fallback) appears at the top.
-    """
+    """Render reference FHIR values as a styled HTML block for the UI."""
     if not sections:
         return ""
 
@@ -115,12 +111,12 @@ def _build_sources_html(sections: list[SourceSection], data_source: str) -> str:
         'border-radius:8px;padding:12px 16px;background:#f9fafb;">',
         f'<div style="margin-bottom:10px;">'
         f'<span style="background:{badge_color};color:#fff;padding:2px 9px;'
-        f'border-radius:10px;font-size:0.82em;font-weight:600;">数据来源: {badge_label}</span>'
-        f'</div>',
+        f'border-radius:10px;font-size:0.82em;font-weight:600;">'
+        f"Data Source: {badge_label}</span>"
+        f"</div>",
     ]
 
     for section in sections:
-        # Skip sections that are just ["None"] to keep the panel clean
         if section.items == ["None"]:
             continue
 
@@ -132,6 +128,19 @@ def _build_sources_html(sections: list[SourceSection], data_source: str) -> str:
         )
         for item in section.items:
             lines.append(f"<li>{item}</li>")
+        if section.hidden_items:
+            hidden_count = len(section.hidden_items)
+            lines.append(
+                f'<li style="list-style:none;margin-top:4px;">'
+                f'<details>'
+                f'<summary style="cursor:pointer;color:#2563eb;">'
+                f"Show {hidden_count} more"
+                f"</summary>"
+                f'<ul style="margin:4px 0 4px 18px;padding:0;color:#4b5563;">'
+            )
+            for hidden_item in section.hidden_items:
+                lines.append(f"<li>{hidden_item}</li>")
+            lines.append("</ul></details></li>")
         lines.append("</ul></details>")
 
     lines.append("</div>")
@@ -164,37 +173,40 @@ def on_generate(
     patient_label: str | None,
     role: str,
 ) -> Generator[tuple[str, str, str, str, gr.update], None, None]:
-    """Streaming generator for summary generation.
-
-    Yields (summary_markdown, status, footer_html, sources_html, btn_update)
-    on each LLM chunk.  The sources panel is populated on the final yield.
-    """
+    """Stream summary text and populate reference sources on completion."""
     if not patient_label:
         yield (
             "",
-            "请先选择一个病人",
+            "Please select a patient before generating a summary",
             "",
             "",
             gr.update(interactive=True),
         )
         return
 
+    yield (
+        "",
+        "Preparing FHIR reference data...",
+        "",
+        "",
+        gr.update(interactive=False),
+    )
+
     patient_id = _patient_id_map.get(patient_label, patient_label)
-
-    # Determine data source for the footer/badge (same logic as agent)
     data_source = _data_source_label
-
     accumulated_sources: list[SourceSection] = []
 
     for partial_text, source_sections in _agent.generate_summary_stream(patient_id, role):
-        is_final = source_sections is not None
+        section_count = partial_text.count("## ")
+        is_error = partial_text.startswith("**Error:**")
+        is_final = is_error or section_count >= 3
 
-        if is_final:
+        if source_sections is not None:
             accumulated_sources = source_sections or []
 
         sources_html = (
             _build_sources_html(accumulated_sources, data_source)
-            if is_final
+            if accumulated_sources
             else ""
         )
 
@@ -210,9 +222,18 @@ def on_generate(
                 "</p>"
             )
 
+        if not partial_text:
+            status_text = "Reference data ready. Generating Current Issues..."
+        elif section_count <= 1:
+            status_text = "Current Issues ready. Generating Recent Changes..."
+        elif section_count == 2:
+            status_text = "Recent Changes ready. Generating Risks and Follow-up..."
+        else:
+            status_text = ""
+
         yield (
             partial_text,
-            "" if is_final else "正在生成摘要...",
+            "" if is_final else status_text,
             footer_html,
             sources_html,
             gr.update(interactive=is_final),
@@ -266,21 +287,16 @@ with gr.Blocks(title="Smart Patient Summary Generator") as demo:
             summary_output = gr.Markdown(label="Summary", value="")
             footer = gr.HTML(value="")
 
-            # Data sources panel — collapsed by default, expands to show
-            # the exact FHIR values that were fed to the LLM.
-            with gr.Accordion("📋 参考数据来源", open=False):
+            with gr.Accordion("Reference Data Sources", open=False):
                 sources_panel = gr.HTML(value="")
 
     generate_btn.click(
-        fn=lambda: (gr.update(interactive=False), "正在生成摘要..."),
-        inputs=[],
-        outputs=[generate_btn, status_bar],
-        queue=False,
-    ).then(
         fn=on_generate,
         inputs=[patient_dropdown, role_radio],
         outputs=[summary_output, status_bar, footer, sources_panel, generate_btn],
     )
+
+demo.queue()
 
 
 if __name__ == "__main__":

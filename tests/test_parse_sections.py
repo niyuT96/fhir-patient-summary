@@ -1,7 +1,7 @@
 """
 Unit tests for parse_sections() (task 4.1).
 
-Covers Requirements 5.1–5.7:
+Covers Requirements 5.1-5.7:
 - Always returns a dict with exactly the three expected keys
 - Never raises an exception
 - Correctly parses all three headers
@@ -107,7 +107,7 @@ class TestWellFormedInput:
 
 
 # ---------------------------------------------------------------------------
-# Missing headers (Req 5.5) — absent keys default to empty string
+# Missing headers (Req 5.5) - absent keys default to empty string
 # ---------------------------------------------------------------------------
 
 class TestMissingHeaders:
@@ -203,7 +203,7 @@ class TestNonHeaderFallback:
         """A line that almost matches a header must not trigger parsing."""
         text = "## current issues\nsome content"  # wrong case
         result = parse_sections(text)
-        # no recognised headers → fallback
+        # no recognised headers -> fallback
         assert result["current_issues"] == ""
         assert result["risks_and_followup"] == text.strip()
 
@@ -211,6 +211,6 @@ class TestNonHeaderFallback:
         """A header with trailing spaces is NOT a match (case-sensitive, exact)."""
         text = "## Current Issues  \ncontent"
         result = parse_sections(text)
-        # trailing space makes it non-matching → fallback
+        # trailing space makes it non-matching -> fallback
         assert result["current_issues"] == ""
         assert result["risks_and_followup"] == text.strip()

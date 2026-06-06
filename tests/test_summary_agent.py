@@ -5,11 +5,11 @@ Covers:
 - Role validation: unsupported roles return error SummaryResult without LLM call
 - Data-source determination: fhir_server vs local_fallback
 - FHIR fetch: graceful degradation for non-Patient errors
-- FHIR fetch: Patient not found / Patient fetch error → error SummaryResult
+- FHIR fetch: Patient not found / Patient fetch error -> error SummaryResult
 - generated_at is always set (ISO 8601 UTC)
 - patient_id and role always match inputs
-- LLM success → populated sections, error=None
-- LLM failure → error set, sections empty
+- LLM success -> populated sections, error=None
+- LLM failure -> error set, sections empty
 - No unhandled exception ever propagates
 """
 
@@ -21,6 +21,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.agent import SummaryAgent, _fetch_all_fhir_resources, parse_sections
+from src.context_extractor import PatientContextExtractor
 from src.exceptions import FHIRClientError, FHIRUnavailableError
 from src.models import PatientResources, SummaryResult
 
@@ -50,7 +51,7 @@ def _make_fhir_client(
     Args:
         available:         Return value of is_available().
         patient_resources: List returned for Patient get_resource call.
-        side_effects:      Mapping of resource_type → exception to raise
+        side_effects:      Mapping of resource_type -> exception to raise
                            instead of returning a list.
     """
     client = MagicMock()
@@ -170,6 +171,75 @@ class TestDataSource:
         agent = SummaryAgent(fhir_client=fhir, extractor=extractor, llm_client=llm)
         agent.generate_summary("patient-001", "ED Doctor")
         fhir._load_fallback_bundle.assert_called_once()
+
+    def test_fallback_resources_are_filtered_to_selected_patient(self):
+        selected_patient = {
+            "resourceType": "Patient",
+            "id": "p1",
+            "name": [{"text": "Selected Patient"}],
+        }
+        other_patient = {
+            "resourceType": "Patient",
+            "id": "p2",
+            "name": [{"text": "Other Patient"}],
+        }
+        selected_condition = {
+            "resourceType": "Condition",
+            "id": "c1",
+            "subject": {"reference": "Patient/p1"},
+            "code": {"text": "Selected condition"},
+        }
+        other_condition = {
+            "resourceType": "Condition",
+            "id": "c2",
+            "subject": {"reference": "Patient/p2"},
+            "code": {"text": "Other condition"},
+        }
+
+        fhir = MagicMock()
+        fhir._load_fallback_bundle.return_value = [
+            selected_patient,
+            other_patient,
+            selected_condition,
+            other_condition,
+        ]
+        agent = SummaryAgent(
+            fhir_client=fhir,
+            extractor=_make_extractor(),
+            llm_client=_make_llm(),
+        )
+
+        resources = agent._load_fallback_resources("p1")
+
+        assert isinstance(resources, PatientResources)
+        assert resources.patient["id"] == "p1"
+        assert resources.conditions == [selected_condition]
+
+    def test_fallback_resources_match_urn_uuid_patient_references(self):
+        selected_patient = {
+            "resourceType": "Patient",
+            "id": "9e43a3bf-fb4f-4007-8a1f-d8e00e57d4e5",
+            "name": [{"text": "Allen Runte"}],
+        }
+        selected_condition = {
+            "resourceType": "Condition",
+            "id": "condition-1",
+            "subject": {"reference": "urn:uuid:9e43a3bf-fb4f-4007-8a1f-d8e00e57d4e5"},
+            "code": {"text": "Hypertension"},
+        }
+
+        fhir = MagicMock()
+        fhir._load_fallback_bundle.return_value = [selected_patient, selected_condition]
+        agent = SummaryAgent(
+            fhir_client=fhir,
+            extractor=_make_extractor(),
+            llm_client=_make_llm(),
+        )
+
+        resources = agent._load_fallback_resources("9e43a3bf-fb4f-4007-8a1f-d8e00e57d4e5")
+
+        assert isinstance(resources, PatientResources)
+        assert resources.conditions == [selected_condition]
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +399,7 @@ class TestResultInvariants:
         assert result.role == "Care Manager"
 
     def test_never_raises_on_complete_fhir_and_llm_failure(self):
-        """Req 6.1 — generate_summary must always return SummaryResult."""
+        """Req 6.1 - generate_summary must always return SummaryResult."""
         fhir = MagicMock()
         fhir.is_available.side_effect = RuntimeError("Unexpected crash")
         extractor = _make_extractor()
@@ -402,3 +472,60 @@ class TestLLMInvocation:
         agent.generate_summary("patient-001", "Care Manager")
         system_msg = llm.chat.completions.create.call_args.kwargs["messages"][0]
         assert system_msg["content"] == CARE_MANAGER_PROMPT
+
+
+class TestSectionBySectionStreaming:
+    def test_streaming_yields_one_completed_section_at_a_time(self):
+        fhir = _make_fhir_client()
+        extractor = _make_extractor()
+        llm = MagicMock()
+
+        responses = []
+        for content in [
+            "## Current Issues\n- Hypertension",
+            "## Recent Changes\n- A1c increased",
+            "## Risks and Follow-up\n- Recheck BP",
+        ]:
+            choice = MagicMock()
+            choice.message.content = content
+            responses.append(MagicMock(choices=[choice]))
+
+        llm.chat.completions.create.side_effect = responses
+        agent = SummaryAgent(fhir_client=fhir, extractor=extractor, llm_client=llm)
+
+        chunks = list(agent.generate_summary_stream("patient-001", "ED Doctor"))
+
+        assert len(chunks) == 4
+        assert chunks[0][0] == ""
+        assert chunks[0][1] is not None
+        assert "## Current Issues" in chunks[1][0]
+        assert "## Recent Changes" not in chunks[1][0]
+        assert "## Recent Changes" in chunks[2][0]
+        assert "## Risks and Follow-up" not in chunks[2][0]
+        assert "## Risks and Follow-up" in chunks[3][0]
+        assert chunks[1][1] is not None
+        assert chunks[2][1] is not None
+        assert chunks[3][1] is not None
+        assert llm.chat.completions.create.call_count == 3
+
+    def test_source_sections_are_compact(self):
+        fhir = _make_fhir_client()
+        extractor = PatientContextExtractor()
+        llm = _make_llm()
+        agent = SummaryAgent(fhir_client=fhir, extractor=extractor, llm_client=llm)
+        resources = PatientResources(
+            patient=MINIMAL_PATIENT,
+            conditions=[
+                {"code": {"text": "A"}},
+                {"code": {"text": "B"}},
+                {"code": {"text": "C"}},
+                {"code": {"text": "D"}},
+            ],
+        )
+
+        sections = agent._build_source_sections(resources)
+        condition_section = sections[0]
+
+        assert condition_section.label == "Active Conditions (4)"
+        assert condition_section.items == ["A", "B", "C"]
+        assert condition_section.hidden_items == ["D"]

@@ -41,7 +41,7 @@ def _bundle_with(entries: list[dict]) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Task 2.1 — is_available()
+# Task 2.1 - is_available()
 # ---------------------------------------------------------------------------
 
 class TestIsAvailable:
@@ -92,7 +92,7 @@ class TestIsAvailable:
 
 
 # ---------------------------------------------------------------------------
-# Task 2.2 — get_resource() validation and error handling
+# Task 2.2 - get_resource() validation and error handling
 # ---------------------------------------------------------------------------
 
 class TestGetResourceValidation:
@@ -283,7 +283,7 @@ class TestGetResourceURLBuilding:
 
 
 # ---------------------------------------------------------------------------
-# Task 2.5 — Fallback bundle loading and list_patients()
+# Task 2.5 - Fallback bundle loading and list_patients()
 # ---------------------------------------------------------------------------
 
 class TestParseBundleEntries:

@@ -35,6 +35,7 @@ class SourceSection:
 
     label: str          # Display heading, e.g. "Active Conditions"
     items: list[str]    # Formatted text lines extracted from FHIR resources
+    hidden_items: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -51,5 +52,5 @@ class SummaryResult:
     generated_at: str  # ISO 8601 UTC timestamp, e.g. "2026-06-05T14:30:00Z"
     error: str | None = None
     # Structured source data shown in the "Data Sources" panel in the UI.
-    # Each entry is one collapsible section (e.g. Conditions, Medications …).
+    # Each entry is one collapsible section (e.g. Conditions, Medications...).
     source_sections: list[SourceSection] = field(default_factory=list)

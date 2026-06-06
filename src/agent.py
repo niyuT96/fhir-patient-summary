@@ -30,6 +30,8 @@ ED_DOCTOR_PROMPT = (
     "and any acute concerns. Be brief, use medical shorthand where appropriate, and highlight "
     "anything\n"
     "immediately actionable. Do not include care management goals or long-term follow-up plans.\n"
+    "Use only the supplied FHIR context. Do not invent missing values. Keep each section to "
+    "3-5 concise bullet points.\n"
     "\n"
     "Structure your response EXACTLY as:\n"
     "## Current Issues\n"
@@ -48,6 +50,8 @@ CARE_MANAGER_PROMPT = (
     "disease management and care coordination. Focus on: chronic conditions, medication adherence,\n"
     "pending care plan goals, upcoming follow-up needs, and social/functional risks.\n"
     "Use plain clinical language. Include actionable care coordination items.\n"
+    "Use only the supplied FHIR context. Do not invent missing values. Keep each section to "
+    "3-5 concise bullet points.\n"
     "\n"
     "Structure your response EXACTLY as:\n"
     "## Current Issues\n"
@@ -64,6 +68,26 @@ _ROLE_PROMPTS: dict[str, str] = {
     "ED Doctor": ED_DOCTOR_PROMPT,
     "Care Manager": CARE_MANAGER_PROMPT,
 }
+
+_SECTION_PROMPTS: dict[str, str] = {
+    "Current Issues": (
+        "Generate only the 'Current Issues' section. Return exactly:\n"
+        "## Current Issues\n"
+        "<3-5 concise bullet points>"
+    ),
+    "Recent Changes": (
+        "Generate only the 'Recent Changes' section. Return exactly:\n"
+        "## Recent Changes\n"
+        "<2-4 concise bullet points>"
+    ),
+    "Risks and Follow-up": (
+        "Generate only the 'Risks and Follow-up' section. Return exactly:\n"
+        "## Risks and Follow-up\n"
+        "<3-5 concise bullet points>"
+    ),
+}
+
+_SECTION_ORDER = ["Current Issues", "Recent Changes", "Risks and Follow-up"]
 
 # ---------------------------------------------------------------------------
 # Header - key mapping (case-sensitive, must match exactly on their own line)
@@ -365,7 +389,11 @@ class SummaryAgent:
         actual_id = patient.get("id", patient_id)
 
         def _of_type(rtype: str) -> list[dict]:
-            return [r for r in all_resources if r.get("resourceType") == rtype]
+            return [
+                r for r in all_resources
+                if r.get("resourceType") == rtype
+                and self._resource_belongs_to_patient(r, actual_id)
+            ]
 
         return PatientResources(
             patient=patient,
@@ -376,6 +404,22 @@ class SummaryAgent:
             encounters=_of_type("Encounter"),
             care_plans=_of_type("CarePlan"),
         )
+
+    @staticmethod
+    def _resource_belongs_to_patient(resource: dict, patient_id: str) -> bool:
+        """Return True when a FHIR resource references the selected patient."""
+        expected_refs = {
+            patient_id,
+            f"Patient/{patient_id}",
+            f"urn:uuid:{patient_id}",
+        }
+
+        for field_name in ("subject", "patient", "beneficiary"):
+            reference = resource.get(field_name, {}).get("reference")
+            if reference in expected_refs:
+                return True
+
+        return False
 
     @staticmethod
     def _extract_patient_name(patient: dict) -> str:
@@ -396,42 +440,38 @@ class SummaryAgent:
     # ---------------------------------------------------------------------- #
 
     def _build_source_sections(self, resources: PatientResources) -> list[SourceSection]:
-        """Convert PatientResources into SourceSection list for the UI source panel.
-
-        Re-uses the same formatting helpers as PatientContextExtractor so the
-        values shown in the panel exactly match what was sent to the LLM.
-        """
+        """Build a compact source summary for the UI reference panel."""
         sections: list[SourceSection] = []
+
+        def _source_section(label: str, items: list[str], limit: int = 3) -> SourceSection:
+            if not items:
+                return SourceSection(label=label, items=["None"])
+            return SourceSection(
+                label=label,
+                items=items[:limit],
+                hidden_items=items[limit:],
+            )
 
         # --- Active Conditions ---
         cond_items = [
             self._extractor._format_condition(c).lstrip("- ")
             for c in resources.conditions
         ]
-        sections.append(SourceSection(
-            label=f"Active Conditions ({len(cond_items)})",
-            items=cond_items if cond_items else ["None"],
-        ))
+        sections.append(_source_section(f"Active Conditions ({len(cond_items)})", cond_items))
 
         # --- Active Medications ---
         med_items = [
             self._extractor._format_medication(m).lstrip("- ")
             for m in resources.medications
         ]
-        sections.append(SourceSection(
-            label=f"Active Medications ({len(med_items)})",
-            items=med_items if med_items else ["None"],
-        ))
+        sections.append(_source_section(f"Active Medications ({len(med_items)})", med_items))
 
         # --- Allergies ---
         allergy_items = [
             self._extractor._format_allergy(a).lstrip("- ")
             for a in resources.allergies
         ]
-        sections.append(SourceSection(
-            label=f"Allergies ({len(allergy_items)})",
-            items=allergy_items if allergy_items else ["None"],
-        ))
+        sections.append(_source_section(f"Allergies ({len(allergy_items)})", allergy_items))
 
         # --- Recent Observations (newest first, up to 10) ---
         sorted_obs = sorted(
@@ -444,10 +484,7 @@ class SummaryAgent:
             for o in sorted_obs
         ]
         obs_items = [i for i in obs_items if i]  # drop blanks
-        sections.append(SourceSection(
-            label=f"Recent Observations ({len(obs_items)})",
-            items=obs_items if obs_items else ["None"],
-        ))
+        sections.append(_source_section(f"Recent Observations ({len(obs_items)})", obs_items))
 
         # --- Recent Encounters (newest first, up to 3) ---
         sorted_enc = sorted(
@@ -460,18 +497,12 @@ class SummaryAgent:
             for e in sorted_enc
         ]
         enc_items = [i for i in enc_items if i]
-        sections.append(SourceSection(
-            label=f"Recent Encounters ({len(enc_items)})",
-            items=enc_items if enc_items else ["None"],
-        ))
+        sections.append(_source_section(f"Recent Encounters ({len(enc_items)})", enc_items))
 
         # --- Care Plan ---
         activity_lines = self._extractor._extract_activity_lines(resources.care_plans)
         cp_items = [line.lstrip("- Activity: ") for line in activity_lines]
-        sections.append(SourceSection(
-            label=f"Care Plan ({len(cp_items)} activities)",
-            items=cp_items if cp_items else ["None"],
-        ))
+        sections.append(_source_section(f"Care Plan ({len(cp_items)} activities)", cp_items))
 
         return sections
 
@@ -480,16 +511,13 @@ class SummaryAgent:
     # ---------------------------------------------------------------------- #
 
     def generate_summary_stream(self, patient_id: str, role: str):
-        """Streaming variant of generate_summary.
+        """Generate the summary section by section.
 
         Yields tuples of (partial_markdown: str, source_sections: list[SourceSection] | None).
-        - While the LLM is streaming, source_sections is None.
-        - The final yield carries the complete source_sections list (or [] on error).
+        - First yield carries source_sections immediately after FHIR data is ready.
+        - Each completed section is yielded immediately so the UI can update.
         Never raises; errors are surfaced as a final plain-text yield with source_sections=[].
         """
-        generated_at = _utc_now_iso()
-
-        # --- Role validation ---
         if role not in _ROLE_PROMPTS:
             yield f"**Error:** Unsupported role: {role}", []
             return
@@ -514,37 +542,50 @@ class SummaryAgent:
             yield f"**Error:** {exc}", []
             return
 
-        # Build source sections immediately so the UI can show them as soon
-        # as the LLM starts streaming (source panel doesn't depend on LLM).
         source_sections = self._build_source_sections(resources)
-
         context_text = self._extractor.extract(resources)
-        system_prompt = _ROLE_PROMPTS[role]
+        base_prompt = _ROLE_PROMPTS[role]
 
-        # --- Stream from LLM ---
+        # Let the UI show reference data before waiting for any LLM response.
+        yield "", source_sections
+
         try:
-            stream = self._llm.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": context_text},
-                ],
-                temperature=0.3,
-                max_tokens=800,
-                stream=True,
-            )
-
-            accumulated = ""
-            for chunk in stream:
-                delta = chunk.choices[0].delta.content or ""
-                if delta:
-                    accumulated += delta
-                    # Yield partial markdown; source_sections not ready yet
-                    yield accumulated, None
-
-            # Final yield with source sections
-            yield accumulated, source_sections
+            rendered_sections: list[str] = []
+            for section_name in _SECTION_ORDER:
+                section_text = self._generate_one_section(
+                    base_prompt=base_prompt,
+                    section_name=section_name,
+                    context_text=context_text,
+                )
+                rendered_sections.append(section_text)
+                partial_markdown = "\n\n".join(rendered_sections)
+                yield partial_markdown, source_sections
 
         except Exception as llm_exc:  # noqa: BLE001
-            logger.exception("LLM streaming error: %s", llm_exc)
+            logger.exception("LLM section generation error: %s", llm_exc)
             yield f"**Error:** {llm_exc}", []
+
+    def _generate_one_section(
+        self,
+        base_prompt: str,
+        section_name: str,
+        context_text: str,
+    ) -> str:
+        """Generate one named summary section with a separate LLM request."""
+        response = self._llm.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": base_prompt},
+                {
+                    "role": "user",
+                    "content": (
+                        f"{_SECTION_PROMPTS[section_name]}\n\n"
+                        "FHIR patient context:\n"
+                        f"{context_text}"
+                    ),
+                },
+            ],
+            temperature=0.3,
+            max_tokens=300,
+        )
+        return response.choices[0].message.content.strip()
