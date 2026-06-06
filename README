@@ -6,3 +6,40 @@ Development environment for InterSystems IRIS for Health using Docker Compose.
 
 ```powershell
 docker compose up -d
+```
+
+---
+
+## Sample Data
+
+The file `data/sample-patient-bundle.json` contains a synthetic FHIR R4 transaction bundle used for local development and fallback mode. **No real patient data is included.** All records are fully synthetic and created solely for demonstration purposes.
+
+### Data Format
+
+The bundle follows the FHIR R4 transaction format (`"type": "transaction"`) and includes at minimum:
+
+| Resource Type | Count |
+|---|---|
+| Patient | 1 |
+| Condition | ≥ 3 (active) |
+| MedicationRequest | ≥ 5 (active) |
+| AllergyIntolerance | ≥ 1 |
+| Observation | ≥ 10 (labs + vitals) |
+| Encounter | ≥ 3 |
+| CarePlan | ≥ 1 (active, with goals and activities) |
+
+### References
+
+The synthetic patient data is modelled after the Synthea-style bundles provided in the following repositories:
+
+- **InterSystems FHIR Sample Data**
+  https://github.com/intersystems/samples-FHIR-resource-repository
+  Official InterSystems sample FHIR R4 bundles used as a structural reference for resource shape and field conventions.
+
+- **Synthea — Synthetic Patient Population Simulator**
+  https://github.com/synthetichealth/synthea
+  Open-source tool that generates realistic but entirely fictional patient records in FHIR R4 format.
+
+- **FHIR R4 Specification**
+  https://hl7.org/fhir/R4/
+  Normative standard defining the resource types, field names, and bundle transaction format used throughout this project.
