@@ -24,9 +24,9 @@ services:
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       IRIS_PASSWORD: ${IRIS_PASSWORD}
-      IRIS_BASE_URL: http://iris:52773/fhir/r4
-      IRIS_USERNAME: superuser
-      FHIR_FALLBACK_PATH: ${FHIR_FALLBACK_PATH:-data/sample-patient-bundle.json}
+      IRIS_BASE_URL: ${IRIS_BASE_URL:-http://localhost:52773/csp/healthshare/fhir/fhir/r4}
+      IRIS_USERNAME: ${IRIS_USERNAME:-superuser}
+      FHIR_FALLBACK_PATH: ${FHIR_FALLBACK_PATH:-data}
       LOAD_SAMPLE_BUNDLE: ${LOAD_SAMPLE_BUNDLE:-true}
     depends_on:
       iris:
