@@ -115,7 +115,10 @@ def _post_bundle_file(
             url,
             json=bundle_data,
             auth=(username, password),
-            headers={"Content-Type": "application/fhir+json"},
+            headers={
+                "Accept": "application/fhir+json",
+                "Content-Type": "application/fhir+json",
+            },
             timeout=30,  # Req 9.5
         )
     except Timeout as exc:

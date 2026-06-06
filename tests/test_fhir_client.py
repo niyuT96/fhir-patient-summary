@@ -89,6 +89,7 @@ class TestIsAvailable:
             client.is_available()
             called_url = mock_get.call_args[0][0]
             assert called_url.endswith("/metadata")
+            assert mock_get.call_args.kwargs["headers"]["Accept"] == "application/fhir+json"
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +241,7 @@ class TestGetResourceURLBuilding:
             _, kwargs = mock_get.call_args
             assert kwargs["params"].get("_id") == "patient-abc"
             assert "patient" not in kwargs["params"]
+            assert kwargs["headers"]["Accept"] == "application/fhir+json"
 
     def test_non_patient_resource_uses_patient_param(self):
         """Non-Patient queries must pass patient= as query parameter."""

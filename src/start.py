@@ -11,8 +11,12 @@ from __future__ import annotations
 import logging
 import os
 
+from dotenv import load_dotenv
+
 from src.fhir_client import FHIRClient
 from src.fhir_loader import load_bundle
+
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 logger = logging.getLogger(__name__)

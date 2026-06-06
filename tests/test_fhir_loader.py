@@ -67,3 +67,6 @@ def test_load_bundle_posts_every_json_file_in_directory():
 
         assert patient_ids == ["p1", "p2"]
         assert mock_post.call_count == 2
+        _, kwargs = mock_post.call_args
+        assert kwargs["headers"]["Accept"] == "application/fhir+json"
+        assert kwargs["headers"]["Content-Type"] == "application/fhir+json"

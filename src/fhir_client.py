@@ -39,6 +39,8 @@ _RESOURCE_DEFAULTS: dict[str, dict[str, str]] = {
     "CarePlan": {"status": "active"},
 }
 
+_FHIR_JSON_HEADERS = {"Accept": "application/fhir+json"}
+
 
 class FHIRClient:
     """HTTP client for the IRIS FHIR R4 endpoint with local bundle fallback."""
@@ -76,7 +78,12 @@ class FHIRClient:
         capability-statement probe; ``False`` on any other outcome."""
         try:
             url = f"{self._base_url}/metadata"
-            response = requests.get(url, auth=self._auth, timeout=5)
+            response = requests.get(
+                url,
+                auth=self._auth,
+                headers=_FHIR_JSON_HEADERS,
+                timeout=5,
+            )
             return response.status_code == 200
         except Exception:
             return False
@@ -133,6 +140,7 @@ class FHIRClient:
             response = requests.get(
                 url,
                 auth=self._auth,
+                headers=_FHIR_JSON_HEADERS,
                 params=query,
                 timeout=10,
             )

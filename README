@@ -136,6 +136,9 @@ Important environment variables:
 
 Do not commit `.env`. It may contain secrets.
 
+The application sends `Accept: application/fhir+json` for FHIR GET requests.
+This is required by some IRIS for Health and HealthShare FHIR endpoints.
+
 ## Running Locally
 
 Install dependencies:
