@@ -147,7 +147,14 @@ Demo steps:
 - A user-provided InterSystems IRIS for Health or HealthShare FHIR endpoint
 - OpenAI API key
 
-## Configuration
+## Installation
+
+Clone the repository and enter the project directory:
+
+```powershell
+git clone https://github.com/niyuT96/fhir-patient-summary.git
+cd fhir-patient-summary
+```
 
 Create a local environment file:
 
@@ -156,7 +163,26 @@ Copy-Item .env.example .env
 notepad .env
 ```
 
-Set at least:
+Set `OPENAI_API_KEY` and adjust the IRIS connection settings if you want to
+connect to a live IRIS for Health or HealthShare FHIR endpoint. If the endpoint
+is unavailable, the app can still run with the local fallback data in `data/`.
+
+For local Python usage, install dependencies:
+
+```powershell
+pip install -r requirements.txt
+```
+
+For Docker usage, no local Python package installation is required. Docker
+installs the Python dependencies inside the image when you run:
+
+```powershell
+docker compose up --build
+```
+
+## Configuration
+
+Make sure `.env` contains at least:
 
 ```env
 OPENAI_API_KEY=your-openai-api-key-here
