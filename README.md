@@ -59,6 +59,20 @@ The workflow uses these FHIR resource types:
 
 ## Architecture
 
+```mermaid
+flowchart LR
+    User["User / Browser"] --> UI["Gradio Web UI"]
+    UI --> App["Python App\nFHIR client + context extractor + AI agent"]
+
+    App -->|FHIR API if available| IRIS["External IRIS for Health /\nHealthShare FHIR endpoint"]
+    App -->|fallback if unavailable| Data["Local data/*.json\nFHIR Bundles"]
+
+    App --> Context["Extracted patient context"]
+    Context --> OpenAI["OpenAI API"]
+    OpenAI --> Summary["Role-specific summary"]
+    Summary --> UI
+```
+
 Main components:
 
 - `src.start`: startup entry point. It checks whether the configured user
@@ -90,6 +104,25 @@ Users connect it to their own IRIS for Health or HealthShare FHIR endpoint with
    - Recent Changes
    - Risks and Follow-up
 9. The UI displays the generated summary and expandable reference source data.
+
+## Using the App
+
+The app is intended to help demo users and clinicians quickly turn FHIR patient
+records into a concise, role-specific summary. It does not replace clinical
+judgment.
+
+To use the app:
+
+1. Start it with either Python or Docker.
+2. Open `http://localhost:7860`.
+3. Select a patient from the dropdown.
+4. Select a role: `ED Doctor`, `Care Manager`, `Patient`, or
+   `Family Caregiver`.
+5. Click `Generate Summary`.
+6. Review the generated `Current Issues`, `Recent Changes`, and
+   `Risks and Follow-up` sections.
+7. Expand `Reference Data Sources` to inspect the FHIR values used by the
+   summary.
 
 ## Demo
 
@@ -127,6 +160,7 @@ Set at least:
 
 ```env
 OPENAI_API_KEY=your-openai-api-key-here
+IRIS_USERNAME=superuser
 IRIS_PASSWORD=SYS
 IRIS_BASE_URL=http://localhost:52773/csp/healthshare/fhir/fhir/r4
 FHIR_FALLBACK_PATH=data
@@ -146,10 +180,29 @@ Important environment variables:
 
 Do not commit `.env`. It may contain secrets.
 
+Choose `IRIS_BASE_URL` based on how the app is started:
+
+- Python running on the host machine:
+  `http://localhost:52773/csp/healthshare/fhir/fhir/r4`
+- Docker app container connecting to an IRIS server on the host machine:
+  `http://host.docker.internal:52773/csp/healthshare/fhir/fhir/r4`
+
+If the configured IRIS endpoint is unavailable, the app starts in local fallback
+mode and reads FHIR bundles from `FHIR_FALLBACK_PATH`.
+
 The application sends `Accept: application/fhir+json` for FHIR GET requests.
 This is required by some IRIS for Health and HealthShare FHIR endpoints.
 
 ## Running Locally
+
+This option runs the Python app directly on your computer.
+
+Create and edit `.env` as described above. If your IRIS server is also running
+on your computer, use `localhost` in `IRIS_BASE_URL`:
+
+```env
+IRIS_BASE_URL=http://localhost:52773/csp/healthshare/fhir/fhir/r4
+```
 
 Install dependencies:
 
@@ -175,11 +228,16 @@ The Docker image packages the web application only. It does not require users
 to run a bundled IRIS container. Set `IRIS_BASE_URL` to the user's own IRIS for
 Health or HealthShare FHIR R4 endpoint.
 
-For a user IRIS server running on the host machine:
+Create and edit `.env` as described above. For an IRIS server running on the
+host machine, use `host.docker.internal` because `localhost` inside the app
+container refers to the container itself:
 
 ```env
 IRIS_BASE_URL=http://host.docker.internal:52773/csp/healthshare/fhir/fhir/r4
 ```
+
+If no IRIS server is reachable, the Dockerized app still starts and uses the
+local FHIR bundles copied into the image from `data/`.
 
 Check the configured IRIS FHIR endpoint from PowerShell:
 
@@ -221,7 +279,9 @@ docker compose --profile local-iris up --build
 ```
 
 The `local-iris` profile is for development only. Open Exchange users are
-expected to connect the web app to their own IRIS FHIR endpoint.
+expected to connect the web app to their own IRIS FHIR endpoint. Starting this
+profile creates an IRIS container, but the app can also be tested without it by
+using local fallback data.
 
 ## Sample Data
 
@@ -245,6 +305,10 @@ Each JSON file should be a FHIR Bundle. The code reads resources from:
 ```text
 entry[].resource
 ```
+
+The FHIR Bundle files in `data/` are sourced from the InterSystems
+`samples-FHIR-resource-repository`:
+https://github.com/intersystems/samples-FHIR-resource-repository
 
 When IRIS is unavailable, the app uses local fallback data and lists all
 `Patient` resources found. When IRIS is available and `LOAD_SAMPLE_BUNDLE=true`,
