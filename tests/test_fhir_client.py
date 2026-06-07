@@ -1,5 +1,5 @@
 """
-Unit tests for FHIRClient (tasks 2.1, 2.2, 2.5).
+Unit tests for FHIRClient.
 
 Covers:
 - is_available() returns False when the server is not reachable
@@ -41,7 +41,7 @@ def _bundle_with(entries: list[dict]) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Task 2.1 - is_available()
+# is_available()
 # ---------------------------------------------------------------------------
 
 class TestIsAvailable:
@@ -93,7 +93,7 @@ class TestIsAvailable:
 
 
 # ---------------------------------------------------------------------------
-# Task 2.2 - get_resource() validation and error handling
+# get_resource() validation and error handling
 # ---------------------------------------------------------------------------
 
 class TestGetResourceValidation:
@@ -256,7 +256,7 @@ class TestGetResourceURLBuilding:
             assert kwargs["params"].get("patient") == "patient-abc"
 
     def test_type_specific_defaults_are_applied(self):
-        """Observation defaults (_sort=-date, _count=20) must be sent."""
+        """Observation defaults (_sort=-date, bounded wider _count) must be sent."""
         client = make_client()
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -266,7 +266,47 @@ class TestGetResourceURLBuilding:
             client.get_resource("Observation", "patient-abc")
             _, kwargs = mock_get.call_args
             assert kwargs["params"].get("_sort") == "-date"
-            assert kwargs["params"].get("_count") == "20"
+            assert kwargs["params"].get("_count") == "150"
+
+    def test_condition_defaults_do_not_filter_to_active_only(self):
+        """Live Condition fetch should include active and historical conditions."""
+        client = make_client()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = _bundle_with([])
+
+        with patch("src.fhir_client.requests.get", return_value=mock_response) as mock_get:
+            client.get_resource("Condition", "patient-abc")
+            _, kwargs = mock_get.call_args
+            assert kwargs["params"].get("_count") == "100"
+            assert "clinical-status" not in kwargs["params"]
+
+    def test_medication_defaults_do_not_filter_to_active_only(self):
+        """Live MedicationRequest fetch should include stopped historical requests."""
+        client = make_client()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = _bundle_with([])
+
+        with patch("src.fhir_client.requests.get", return_value=mock_response) as mock_get:
+            client.get_resource("MedicationRequest", "patient-abc")
+            _, kwargs = mock_get.call_args
+            assert kwargs["params"].get("_sort") == "-authoredon"
+            assert kwargs["params"].get("_count") == "150"
+            assert "status" not in kwargs["params"]
+
+    def test_care_plan_defaults_do_not_filter_to_active_only(self):
+        """Live CarePlan fetch should include completed historical plans."""
+        client = make_client()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = _bundle_with([])
+
+        with patch("src.fhir_client.requests.get", return_value=mock_response) as mock_get:
+            client.get_resource("CarePlan", "patient-abc")
+            _, kwargs = mock_get.call_args
+            assert kwargs["params"].get("_count") == "50"
+            assert "status" not in kwargs["params"]
 
     def test_caller_params_override_defaults(self):
         """Caller-supplied params must win over type-specific defaults."""
@@ -285,7 +325,7 @@ class TestGetResourceURLBuilding:
 
 
 # ---------------------------------------------------------------------------
-# Task 2.5 - Fallback bundle loading and list_patients()
+# Fallback bundle loading and list_patients()
 # ---------------------------------------------------------------------------
 
 class TestParseBundleEntries:

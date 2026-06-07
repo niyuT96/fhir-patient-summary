@@ -1,7 +1,7 @@
 """
-Unit tests for parse_sections() (task 4.1).
+Unit tests for parse_sections().
 
-Covers Requirements 5.1-5.7:
+Covers:
 - Always returns a dict with exactly the three expected keys
 - Never raises an exception
 - Correctly parses all three headers
@@ -17,7 +17,7 @@ from src.agent import parse_sections
 
 
 # ---------------------------------------------------------------------------
-# Return-shape invariants (Req 5.1)
+# Return-shape invariants
 # ---------------------------------------------------------------------------
 
 class TestReturnShape:
@@ -54,7 +54,7 @@ class TestReturnShape:
 
 
 # ---------------------------------------------------------------------------
-# Empty input (Req 5.4)
+# Empty input
 # ---------------------------------------------------------------------------
 
 class TestEmptyInput:
@@ -66,7 +66,7 @@ class TestEmptyInput:
 
 
 # ---------------------------------------------------------------------------
-# Well-formed input with all three headers (Req 5.2)
+# Well-formed input with all three headers
 # ---------------------------------------------------------------------------
 
 class TestWellFormedInput:
@@ -107,7 +107,7 @@ class TestWellFormedInput:
 
 
 # ---------------------------------------------------------------------------
-# Missing headers (Req 5.5) - absent keys default to empty string
+# Missing headers - absent keys default to empty string
 # ---------------------------------------------------------------------------
 
 class TestMissingHeaders:
@@ -135,7 +135,7 @@ class TestMissingHeaders:
 
 
 # ---------------------------------------------------------------------------
-# Header present but no content (Req 5.3)
+# Header present but no content
 # ---------------------------------------------------------------------------
 
 class TestEmptySection:
@@ -152,7 +152,7 @@ class TestEmptySection:
 
 
 # ---------------------------------------------------------------------------
-# Whitespace stripping (Req 5.6)
+# Whitespace stripping
 # ---------------------------------------------------------------------------
 
 class TestWhitespaceStripping:
@@ -174,7 +174,7 @@ class TestWhitespaceStripping:
 
 
 # ---------------------------------------------------------------------------
-# Non-header fallback (Req 5.7)
+# Non-header fallback
 # ---------------------------------------------------------------------------
 
 class TestNonHeaderFallback:

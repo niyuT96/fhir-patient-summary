@@ -1,5 +1,5 @@
 """
-Unit tests for PatientContextExtractor (task 5.1).
+Unit tests for PatientContextExtractor.
 
 Covers:
 - Demographics extraction: name (text / given+family fallback), DOB, gender, MRN
@@ -308,7 +308,7 @@ class TestAllergies:
         output = extractor.extract(resources)
         section_start = output.index("=== Allergies ===")
         section_excerpt = output[section_start:section_start + 60]
-        assert "None" in section_excerpt
+        assert "No allergies documented" in section_excerpt
 
 
 # ---------------------------------------------------------------------------
@@ -357,7 +357,7 @@ class TestExtractContract:
 
 
 # ---------------------------------------------------------------------------
-# Observations (task 5.2)
+# Observations
 # ---------------------------------------------------------------------------
 
 class TestObservations:
@@ -469,7 +469,7 @@ class TestObservations:
 
 
 # ---------------------------------------------------------------------------
-# Encounters (task 5.2)
+# Encounters
 # ---------------------------------------------------------------------------
 
 class TestEncounters:
@@ -557,7 +557,7 @@ class TestEncounters:
 
 
 # ---------------------------------------------------------------------------
-# Care Plan (task 5.2)
+# Care Plan
 # ---------------------------------------------------------------------------
 
 class TestCarePlan:
@@ -565,15 +565,16 @@ class TestCarePlan:
         plan = {
             "resourceType": "CarePlan",
             "status": "active",
+            "category": [{"text": "Diabetes plan"}],
             "activity": [
-                {"detail": {"description": "Walk 30 minutes daily"}},
-                {"detail": {"description": "Monitor blood pressure weekly"}},
+                {"detail": {"description": "Review insulin rescue plan"}},
+                {"detail": {"description": "Monitor hypoglycemia risk"}},
             ],
         }
         resources = make_resources(care_plans=[plan])
         output = extractor.extract(resources)
-        assert "Walk 30 minutes daily" in output
-        assert "Monitor blood pressure weekly" in output
+        assert "Review insulin rescue plan" in output
+        assert "Monitor hypoglycemia risk" in output
 
     def test_care_plan_no_activities_renders_none(self):
         plan = {
@@ -598,18 +599,273 @@ class TestCarePlan:
         plan = {
             "resourceType": "CarePlan",
             "status": "active",
+            "category": [{"text": "Substance use plan"}],
             "activity": [
                 {"detail": {}},  # no description
-                {"detail": {"description": "Take medication as prescribed"}},
+                {"detail": {"description": "Arrange opioid overdose follow-up"}},
             ],
         }
         resources = make_resources(care_plans=[plan])
         output = extractor.extract(resources)
-        assert "Take medication as prescribed" in output
+        assert "Arrange opioid overdose follow-up" in output
 
 
 # ---------------------------------------------------------------------------
-# Token budget enforcement (task 5.2)
+# ED-focused clinical context coverage
+# ---------------------------------------------------------------------------
+
+class TestEDFocusedContext:
+    def test_living_patient_omits_missing_death_context(self):
+        output = extractor.extract(make_resources())
+
+        assert "Deceased: not documented" not in output
+        assert "Death certification encounter date: not documented" not in output
+        assert "Cause of death observation: not documented" not in output
+
+    def test_patient_death_and_latest_encounter_age_are_included(self):
+        patient = minimal_patient(
+            birthDate="1980-06-15",
+            deceasedDateTime="2024-04-01T12:00:00Z",
+        )
+        encounters = [
+            {
+                "resourceType": "Encounter",
+                "type": [{"text": "Office Visit"}],
+                "period": {"start": "2023-01-01T00:00:00Z"},
+            },
+            {
+                "resourceType": "Encounter",
+                "type": [{"text": "Death Certification"}],
+                "period": {"start": "2024-04-02T00:00:00Z"},
+            },
+        ]
+        observations = [
+            {
+                "resourceType": "Observation",
+                "code": {"text": "Cause of death"},
+                "valueString": "Cardiopulmonary arrest",
+                "effectiveDateTime": "2024-04-01T00:00:00Z",
+            }
+        ]
+
+        output = extractor.extract(make_resources(
+            patient=patient,
+            encounters=encounters,
+            observations=observations,
+        ))
+
+        assert "Age at latest encounter: 43" in output
+        assert "Deceased: 2024-04-01T12:00:00Z" in output
+        assert "Death certification encounter date: 2024-04-02" in output
+        assert "Cause of death observation: Cause of death: Cardiopulmonary arrest" in output
+
+    def test_encounters_include_ascending_dates_latest_details_and_ed_relevance(self):
+        encounters = [
+            {
+                "resourceType": "Encounter",
+                "type": [{"text": "Acute ED Visit"}],
+                "class": {"code": "EMER", "display": "Emergency"},
+                "status": "finished",
+                "period": {"start": "2024-03-10T08:00:00Z"},
+                "reasonCode": [{"text": "Severe abdominal pain"}],
+                "diagnosis": [{"condition": {"display": "GI bleeding"}}],
+            },
+            {
+                "resourceType": "Encounter",
+                "type": [{"text": "Detox follow-up"}],
+                "status": "finished",
+                "period": {"start": "2024-01-01T00:00:00Z"},
+            },
+        ]
+
+        output = extractor.extract(make_resources(encounters=encounters))
+
+        assert "All encounter dates ascending: 2024-01-01, 2024-03-10" in output
+        assert "Latest encounter: - date: 2024-03-10" in output
+        assert "class: Emergency" in output
+        assert "status: finished" in output
+        assert "reason: Severe abdominal pain" in output
+        assert "diagnosis: GI bleeding" in output
+        assert "ED-relevant encounters:" in output
+        assert "Detox follow-up" in output
+
+    def test_conditions_include_status_dates_and_rank_ed_relevance(self):
+        conditions = [
+            {
+                "resourceType": "Condition",
+                "code": {"text": "Seasonal allergies"},
+                "clinicalStatus": {"coding": [{"display": "active"}]},
+                "verificationStatus": {"coding": [{"display": "confirmed"}]},
+                "recordedDate": "2024-01-01",
+            },
+            {
+                "resourceType": "Condition",
+                "code": {"text": "Metastatic cancer"},
+                "clinicalStatus": {"coding": [{"display": "active"}]},
+                "verificationStatus": {"coding": [{"display": "confirmed"}]},
+                "onsetDateTime": "2023-01-01",
+                "recordedDate": "2024-02-01",
+            },
+            {
+                "resourceType": "Condition",
+                "code": {"text": "Prior stroke"},
+                "clinicalStatus": {"coding": [{"display": "resolved"}]},
+                "verificationStatus": {"coding": [{"display": "confirmed"}]},
+                "abatementDateTime": "2020-01-01",
+            },
+        ]
+
+        output = extractor.extract(make_resources(conditions=conditions))
+
+        assert output.index("Metastatic cancer") < output.index("Seasonal allergies")
+        assert "clinicalStatus: active" in output
+        assert "verificationStatus: confirmed" in output
+        assert "onsetDateTime: 2023-01-01" in output
+        assert "recordedDate: 2024-02-01" in output
+        assert "abatementDateTime: 2020-01-01" in output
+        assert "Prior stroke" in output
+
+    def test_observations_include_bp_components_abnormal_flags_and_social_history(self):
+        observations = [
+            {
+                "resourceType": "Observation",
+                "code": {"text": "Blood Pressure"},
+                "component": [
+                    {
+                        "code": {"text": "Systolic Blood Pressure"},
+                        "valueQuantity": {"value": 148, "unit": "mmHg"},
+                    },
+                    {
+                        "code": {"text": "Diastolic Blood Pressure"},
+                        "valueQuantity": {"value": 92, "unit": "mmHg"},
+                    },
+                ],
+                "effectiveDateTime": "2024-03-15T10:00:00Z",
+            },
+            {
+                "resourceType": "Observation",
+                "code": {"text": "Creatinine"},
+                "valueQuantity": {"value": 2.4, "unit": "mg/dL"},
+                "interpretation": [{"coding": [{"code": "H", "display": "High"}]}],
+                "referenceRange": [{"low": {"value": 0.6, "unit": "mg/dL"}, "high": {"value": 1.2, "unit": "mg/dL"}}],
+                "effectiveDateTime": "2024-03-15T09:00:00Z",
+            },
+            {
+                "resourceType": "Observation",
+                "code": {"text": "Smoking status"},
+                "valueString": "Current smoker",
+                "effectiveDateTime": "2024-03-01T00:00:00Z",
+            },
+        ]
+
+        output = extractor.extract(make_resources(observations=observations))
+
+        assert "Blood Pressure: Systolic Blood Pressure 148 mmHg / Diastolic Blood Pressure 92 mmHg" in output
+        assert "Creatinine: 2.4 mg/dL" in output
+        assert "flag: High" in output
+        assert "reference range: 0.6 mg/dL-1.2 mg/dL" in output
+        assert "=== Social History Observations ===" in output
+        assert "Smoking status: Current smoker" in output
+
+    def test_medications_include_high_risk_details_and_deceased_historical_label(self):
+        patient = minimal_patient(deceasedDateTime="2024-04-01T12:00:00Z")
+        medication = {
+            "resourceType": "MedicationRequest",
+            "medicationCodeableConcept": {"text": "Warfarin"},
+            "status": "active",
+            "authoredOn": "2024-02-01",
+            "dosageInstruction": [
+                {
+                    "text": "5 mg daily",
+                    "route": {"text": "oral"},
+                    "timing": {
+                        "repeat": {
+                            "frequency": 1,
+                            "period": 1,
+                            "periodUnit": "d",
+                            "boundsPeriod": {
+                                "start": "2024-02-01",
+                                "end": "2024-04-01",
+                            },
+                        }
+                    },
+                }
+            ],
+            "reasonCode": [{"text": "Atrial fibrillation"}],
+        }
+
+        output = extractor.extract(make_resources(patient=patient, medications=[medication]))
+
+        assert "Warfarin" in output
+        assert "status: active" in output
+        assert "authoredOn: 2024-02-01" in output
+        assert "route: oral" in output
+        assert "frequency: 1 per 1 d" in output
+        assert "start: 2024-02-01; end: 2024-04-01" in output
+        assert "indication: Atrial fibrillation" in output
+        assert "high-risk: yes" in output
+        assert "currentness: historical because patient is deceased" in output
+
+    def test_deceased_patient_includes_stopped_medications_as_history(self):
+        patient = minimal_patient(deceasedDateTime="2001-07-22T00:00:00Z")
+        medication = {
+            "resourceType": "MedicationRequest",
+            "medicationCodeableConcept": {"text": "Oxaliplatin"},
+            "status": "stopped",
+            "authoredOn": "2001-06-01",
+            "dosageInstruction": [{"text": "85 mg/m2 per cycle"}],
+        }
+
+        output = extractor.extract(make_resources(patient=patient, medications=[medication]))
+
+        assert "=== Active Medications ===" in output
+        assert "None documented as currently active" in output
+        assert "=== Medication History ===" in output
+        assert "Oxaliplatin" in output
+        assert "status: stopped" in output
+        assert "currentness: historical because patient is deceased" in output
+
+    def test_allergy_detail_includes_status_severity_and_recorded_date(self):
+        allergy = {
+            "resourceType": "AllergyIntolerance",
+            "code": {"text": "Penicillin"},
+            "clinicalStatus": {"coding": [{"display": "active"}]},
+            "verificationStatus": {"coding": [{"display": "confirmed"}]},
+            "recordedDate": "2024-01-01",
+            "reaction": [
+                {
+                    "manifestation": [{"text": "Anaphylaxis"}],
+                    "severity": "severe",
+                }
+            ],
+        }
+
+        output = extractor.extract(make_resources(allergies=[allergy]))
+
+        assert "Penicillin" in output
+        assert "clinicalStatus: active" in output
+        assert "verificationStatus: confirmed" in output
+        assert "recordedDate: 2024-01-01" in output
+        assert "manifestation: Anaphylaxis" in output
+        assert "severity: severe" in output
+
+    def test_non_actionable_care_plan_is_ignored(self):
+        plan = {
+            "resourceType": "CarePlan",
+            "status": "active",
+            "category": [{"text": "Routine wellness"}],
+            "activity": [{"detail": {"description": "Walk 30 minutes daily"}}],
+        }
+
+        output = extractor.extract(make_resources(care_plans=[plan]))
+
+        care_plan_section = output[output.index("=== Care Plan ==="):]
+        assert "Walk 30 minutes daily" not in care_plan_section
+        assert "None" in care_plan_section
+
+
+# ---------------------------------------------------------------------------
+# Token budget enforcement
 # ---------------------------------------------------------------------------
 
 class TestTokenBudget:

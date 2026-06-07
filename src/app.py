@@ -1,7 +1,6 @@
 """
 Gradio UI for patient selection, role selection, and summary display.
 
-Requirements: 8.1-8.10, 10.4
 """
 
 from __future__ import annotations
@@ -14,7 +13,7 @@ import gradio as gr
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from src.agent import SummaryAgent
+from src.agent import SUPPORTED_ROLES, SummaryAgent
 from src.context_extractor import PatientContextExtractor
 from src.fhir_client import FHIRClient
 from src.models import SourceSection
@@ -22,7 +21,7 @@ from src.models import SourceSection
 load_dotenv()
 
 # ---------------------------------------------------------------------------
-# Startup guard - Req 10.4
+# Startup guard
 # ---------------------------------------------------------------------------
 _api_key = os.environ.get("OPENAI_API_KEY", "").strip()
 if not _api_key:
@@ -267,8 +266,8 @@ with gr.Blocks(title="Smart Patient Summary Generator") as demo:
                 interactive=bool(_patient_choices),
             )
             role_radio = gr.Radio(
-                choices=["ED Doctor", "Care Manager"],
-                label="Clinician Role",
+                choices=list(SUPPORTED_ROLES),
+                label="Summary Role",
                 value="ED Doctor",
             )
             generate_btn = gr.Button(

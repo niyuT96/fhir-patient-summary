@@ -1,5 +1,5 @@
 """
-Unit tests for SummaryAgent (tasks 7.1, 7.2, 7.4).
+Unit tests for SummaryAgent.
 
 Covers:
 - Role validation: unsupported roles return error SummaryResult without LLM call
@@ -99,7 +99,7 @@ def _make_agent(*, available=True, patient_resources=None, side_effects=None, ll
 
 
 # ---------------------------------------------------------------------------
-# Role validation (Req 4.3, 6.6, 6.7)
+# Role validation
 # ---------------------------------------------------------------------------
 
 class TestRoleValidation:
@@ -136,9 +136,19 @@ class TestRoleValidation:
         result = agent.generate_summary("patient-001", "Care Manager")
         assert result.error is None or "Unsupported role" not in (result.error or "")
 
+    def test_patient_is_valid(self):
+        agent, _, _, _ = _make_agent()
+        result = agent.generate_summary("patient-001", "Patient")
+        assert result.error is None or "Unsupported role" not in (result.error or "")
+
+    def test_family_caregiver_is_valid(self):
+        agent, _, _, _ = _make_agent()
+        result = agent.generate_summary("patient-001", "Family Caregiver")
+        assert result.error is None or "Unsupported role" not in (result.error or "")
+
 
 # ---------------------------------------------------------------------------
-# Data-source determination (Req 2.3, 2.4)
+# Data-source determination
 # ---------------------------------------------------------------------------
 
 class TestDataSource:
@@ -243,7 +253,7 @@ class TestDataSource:
 
 
 # ---------------------------------------------------------------------------
-# Patient not found / Patient fetch errors (Req 7.2, 7.3)
+# Patient not found / Patient fetch errors
 # ---------------------------------------------------------------------------
 
 class TestPatientFetchErrors:
@@ -280,7 +290,7 @@ class TestPatientFetchErrors:
 
 
 # ---------------------------------------------------------------------------
-# Graceful degradation for non-Patient fetch errors (Req 7.1, 7.4, 7.5)
+# Graceful degradation for non-Patient fetch errors
 # ---------------------------------------------------------------------------
 
 class TestNonPatientFetchGracefulDegradation:
@@ -347,7 +357,7 @@ class TestFetchAllFhirResources:
         assert "not found" in result.error.lower()
 
     def test_previously_fetched_resources_preserved_after_later_error(self):
-        """Resources fetched before a later error must be retained (Req 7.5)."""
+        """Resources fetched before a later error must be retained."""
         conditions = [{"resourceType": "Condition", "code": {"text": "Hypertension"}}]
 
         def _get_resource(resource_type, patient_id, params=None):
@@ -366,9 +376,37 @@ class TestFetchAllFhirResources:
         assert result.conditions == conditions
         assert result.medications == []
 
+    def test_fetch_plan_uses_broad_bounded_queries(self):
+        """Live fetch should not filter out historical clinical context."""
+        calls = {}
+
+        def _get_resource(resource_type, patient_id, params=None):
+            calls[resource_type] = dict(params or {})
+            if resource_type == "Patient":
+                return [MINIMAL_PATIENT]
+            return []
+
+        fhir = MagicMock()
+        fhir.get_resource.side_effect = _get_resource
+
+        result = _fetch_all_fhir_resources(fhir, "patient-001")
+
+        assert isinstance(result, PatientResources)
+        assert "clinical-status" not in calls["Condition"]
+        assert calls["Condition"]["_count"] == "100"
+        assert "status" not in calls["MedicationRequest"]
+        assert calls["MedicationRequest"]["_count"] == "150"
+        assert calls["MedicationRequest"]["_sort"] == "-authoredon"
+        assert calls["Observation"]["_count"] == "150"
+        assert calls["Observation"]["_sort"] == "-date"
+        assert calls["Encounter"]["_count"] == "75"
+        assert calls["Encounter"]["_sort"] == "-date"
+        assert "status" not in calls["CarePlan"]
+        assert calls["CarePlan"]["_count"] == "50"
+
 
 # ---------------------------------------------------------------------------
-# generated_at / patient_id / role invariants (Req 6.4, 6.5, 6.6)
+# generated_at / patient_id / role invariants
 # ---------------------------------------------------------------------------
 
 class TestResultInvariants:
@@ -399,7 +437,7 @@ class TestResultInvariants:
         assert result.role == "Care Manager"
 
     def test_never_raises_on_complete_fhir_and_llm_failure(self):
-        """Req 6.1 - generate_summary must always return SummaryResult."""
+        """generate_summary must always return SummaryResult."""
         fhir = MagicMock()
         fhir.is_available.side_effect = RuntimeError("Unexpected crash")
         extractor = _make_extractor()
@@ -412,7 +450,7 @@ class TestResultInvariants:
 
 
 # ---------------------------------------------------------------------------
-# LLM invocation results (Task 7.4 coverage)
+# LLM invocation results
 # ---------------------------------------------------------------------------
 
 class TestLLMInvocation:
@@ -472,6 +510,20 @@ class TestLLMInvocation:
         agent.generate_summary("patient-001", "Care Manager")
         system_msg = llm.chat.completions.create.call_args.kwargs["messages"][0]
         assert system_msg["content"] == CARE_MANAGER_PROMPT
+
+    def test_patient_prompt_used_for_patient_role(self):
+        from src.agent import PATIENT_PROMPT
+        agent, _, _, llm = _make_agent()
+        agent.generate_summary("patient-001", "Patient")
+        system_msg = llm.chat.completions.create.call_args.kwargs["messages"][0]
+        assert system_msg["content"] == PATIENT_PROMPT
+
+    def test_family_caregiver_prompt_used_for_family_caregiver_role(self):
+        from src.agent import FAMILY_CAREGIVER_PROMPT
+        agent, _, _, llm = _make_agent()
+        agent.generate_summary("patient-001", "Family Caregiver")
+        system_msg = llm.chat.completions.create.call_args.kwargs["messages"][0]
+        assert system_msg["content"] == FAMILY_CAREGIVER_PROMPT
 
 
 class TestSectionBySectionStreaming:

@@ -2,7 +2,6 @@
 FHIRLoader is a one-time startup script that POSTs the local synthetic FHIR
 bundle to the IRIS FHIR R4 server.
 
-Requirements: 9.1-9.5
 """
 
 from __future__ import annotations
@@ -33,7 +32,7 @@ def load_bundle(
 
     Idempotency guard: if ``data/loaded-patient-ids.json`` already exists
     and is non-empty, return the previously assigned patient IDs without
-    re-POSTing (Requirement 9.4).
+    re-POSTing.
 
     Args:
         fhir_base_url: Base URL of the FHIR R4 server (e.g.
@@ -49,7 +48,7 @@ def load_bundle(
     Raises:
         FHIRLoaderError: On non-200 HTTP response, connection error, or timeout.
     """
-    # --- Idempotency guard (Req 9.4) ---
+    # --- Idempotency guard ---
     if os.path.exists(_IDEMPOTENCY_FILE):
         try:
             with open(_IDEMPOTENCY_FILE, "r", encoding="utf-8") as fh:
@@ -119,7 +118,7 @@ def _post_bundle_file(
                 "Accept": "application/fhir+json",
                 "Content-Type": "application/fhir+json",
             },
-            timeout=30,  # Req 9.5
+            timeout=30,
         )
     except Timeout as exc:
         raise FHIRLoaderError(
@@ -130,14 +129,14 @@ def _post_bundle_file(
             f"Connection error while POSTing {bundle_file} to {url}: {exc}"
         ) from exc
 
-    # --- Handle non-200 (Req 9.3) ---
+    # --- Handle non-200 responses ---
     if response.status_code != 200:
         raise FHIRLoaderError(
             f"FHIR server returned HTTP {response.status_code} when loading {bundle_file}. "
             f"Body: {response.text[:500]}"
         )
 
-    # --- Parse response and extract assigned IDs (Req 9.2) ---
+    # --- Parse response and extract assigned IDs ---
     response_bundle: dict = response.json()
     patient_ids: list[str] = []
     resource_counts: dict[str, int] = defaultdict(int)
@@ -154,7 +153,7 @@ def _post_bundle_file(
                 if resource_type == "Patient":
                     patient_ids.append(resource_id)
 
-    # Log success per resource type (Req 9.2)
+    # Log success per resource type.
     for rtype, count in sorted(resource_counts.items()):
         logger.info("Loaded %d %s resource(s).", count, rtype)
 

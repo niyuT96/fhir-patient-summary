@@ -1,9 +1,11 @@
 """
 Container startup entry point.
 
-When the IRIS FHIR endpoint is reachable, this script loads the bundled sample
-FHIR transaction once before starting the Gradio UI. If IRIS is unavailable or
-the load fails, the UI still starts and uses the local JSON fallback.
+The web app is designed to connect to a user-provided IRIS FHIR endpoint.
+By default, startup does not write sample data into that endpoint. If
+LOAD_SAMPLE_BUNDLE=true, this script attempts to load local FHIR sample bundles
+before starting the Gradio UI. If IRIS is unavailable or loading fails, the UI
+still starts and uses the local JSON fallback.
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 def maybe_load_sample_bundle() -> None:
     """Load sample FHIR data into IRIS when the endpoint is reachable."""
-    should_load = os.environ.get("LOAD_SAMPLE_BUNDLE", "true").strip().lower()
+    should_load = os.environ.get("LOAD_SAMPLE_BUNDLE", "false").strip().lower()
     if should_load in {"0", "false", "no"}:
         logger.info("LOAD_SAMPLE_BUNDLE is disabled; skipping FHIR bundle load.")
         return
@@ -56,9 +58,15 @@ def maybe_load_sample_bundle() -> None:
         logger.warning("FHIR sample bundle load failed; using local fallback data: %s", exc)
 
 
-if __name__ == "__main__":
+def run_app() -> None:
+    """Start the Gradio web UI."""
     maybe_load_sample_bundle()
 
     from src.app import demo
 
-    demo.launch(server_name="0.0.0.0", server_port=7860)
+    server_port = int(os.environ.get("GRADIO_SERVER_PORT", "7860"))
+    demo.launch(server_name="0.0.0.0", server_port=server_port)
+
+
+if __name__ == "__main__":
+    run_app()

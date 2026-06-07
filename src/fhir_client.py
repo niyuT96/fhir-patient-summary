@@ -32,11 +32,11 @@ _ALLOWED_RESOURCE_TYPES = {
 
 # Type-specific default query parameters
 _RESOURCE_DEFAULTS: dict[str, dict[str, str]] = {
-    "Observation": {"_sort": "-date", "_count": "20"},
-    "Encounter": {"_sort": "-date", "_count": "5"},
-    "Condition": {"clinical-status": "active"},
-    "MedicationRequest": {"status": "active"},
-    "CarePlan": {"status": "active"},
+    "Condition": {"_count": "100"},
+    "MedicationRequest": {"_sort": "-authoredon", "_count": "150"},
+    "Observation": {"_sort": "-date", "_count": "150"},
+    "Encounter": {"_sort": "-date", "_count": "75"},
+    "CarePlan": {"_count": "50"},
 }
 
 _FHIR_JSON_HEADERS = {"Accept": "application/fhir+json"}

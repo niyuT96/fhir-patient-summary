@@ -1,5 +1,5 @@
 """
-Unit tests for SummaryAgent task 7.1:
+Unit tests for SummaryAgent:
   - Role-specific prompts (module-level constants)
   - SummaryAgent.__init__()
   - generate_summary() role validation (unsupported role -> immediate error result)
@@ -14,8 +14,15 @@ import pytest
 
 from src.agent import (
     CARE_MANAGER_PROMPT,
+    DECEASED_RECORD_RULES,
     ED_DOCTOR_PROMPT,
+    FAMILY_CAREGIVER_PROMPT,
+    LIVING_PATIENT_RULES,
+    PATIENT_PROMPT,
+    SUPPORTED_ROLES,
     SummaryAgent,
+    VOICE_AND_AUDIENCE_RULES,
+    _SECTION_PROMPTS,
     _utc_now_iso,
 )
 from src.models import SummaryResult
@@ -29,7 +36,7 @@ def _make_agent(is_available: bool = True) -> tuple[SummaryAgent, MagicMock, Mag
     """Return a SummaryAgent wired with mock dependencies.
 
     The FHIRClient.is_available() mock returns *is_available*.
-    _fetch_resources is patched so it raises NotImplementedError (the task 7.2 stub).
+    _fetch_resources is patched so it raises NotImplementedError.
     """
     fhir_client = MagicMock()
     fhir_client.is_available.return_value = is_available
@@ -52,6 +59,14 @@ class TestPromptConstants:
         assert isinstance(CARE_MANAGER_PROMPT, str)
         assert len(CARE_MANAGER_PROMPT) > 0
 
+    def test_patient_prompt_is_non_empty_string(self):
+        assert isinstance(PATIENT_PROMPT, str)
+        assert len(PATIENT_PROMPT) > 0
+
+    def test_family_caregiver_prompt_is_non_empty_string(self):
+        assert isinstance(FAMILY_CAREGIVER_PROMPT, str)
+        assert len(FAMILY_CAREGIVER_PROMPT) > 0
+
     def test_ed_doctor_prompt_mentions_ed_focus(self):
         """Prompt should reference ED / emergency physician focus per design."""
         assert "Emergency Department" in ED_DOCTOR_PROMPT
@@ -64,14 +79,101 @@ class TestPromptConstants:
         assert "Care Manager" in CARE_MANAGER_PROMPT
 
     def test_both_prompts_include_section_headers(self):
-        """Both prompts must instruct the LLM to emit the three section headers."""
-        for prompt in (ED_DOCTOR_PROMPT, CARE_MANAGER_PROMPT):
+        """All prompts must instruct the LLM to emit the three section headers."""
+        for prompt in (
+            ED_DOCTOR_PROMPT,
+            CARE_MANAGER_PROMPT,
+            PATIENT_PROMPT,
+            FAMILY_CAREGIVER_PROMPT,
+        ):
             assert "## Current Issues" in prompt
             assert "## Recent Changes" in prompt
             assert "## Risks and Follow-up" in prompt
 
     def test_prompts_are_distinct(self):
-        assert ED_DOCTOR_PROMPT != CARE_MANAGER_PROMPT
+        prompts = {
+            ED_DOCTOR_PROMPT,
+            CARE_MANAGER_PROMPT,
+            PATIENT_PROMPT,
+            FAMILY_CAREGIVER_PROMPT,
+        }
+        assert len(prompts) == 4
+
+    def test_supported_roles_include_all_required_roles(self):
+        assert SUPPORTED_ROLES == (
+            "ED Doctor",
+            "Care Manager",
+            "Patient",
+            "Family Caregiver",
+        )
+
+    def test_all_prompts_include_deceased_record_guardrails(self):
+        for prompt in (
+            ED_DOCTOR_PROMPT,
+            CARE_MANAGER_PROMPT,
+            PATIENT_PROMPT,
+            FAMILY_CAREGIVER_PROMPT,
+        ):
+            assert DECEASED_RECORD_RULES in prompt
+            assert "summarize retrospectively only" in prompt
+            assert "Do NOT recommend active treatment" in prompt
+            assert "estate management" in prompt
+            assert "unless explicitly documented" in prompt
+            assert "FHIR-listed active diagnoses before death" in prompt
+            assert "Do not say 'medications at the time of death'" in prompt
+            assert "Do not use vague phrases like 'documentation gaps may exist'" in prompt
+            assert "do not frame missing recent vitals/labs as an active concern" in prompt
+            assert "Avoid repeating the same death date/cause in every section" in prompt
+
+    def test_all_prompts_include_living_patient_death_field_guardrails(self):
+        for prompt in (
+            ED_DOCTOR_PROMPT,
+            CARE_MANAGER_PROMPT,
+            PATIENT_PROMPT,
+            FAMILY_CAREGIVER_PROMPT,
+        ):
+            assert LIVING_PATIENT_RULES in prompt
+            assert "Do NOT mention missing death certification" in prompt
+            assert "Do NOT infer end-of-life care needs" in prompt
+
+    def test_all_prompts_include_voice_and_audience_rules(self):
+        for prompt in (
+            ED_DOCTOR_PROMPT,
+            CARE_MANAGER_PROMPT,
+            PATIENT_PROMPT,
+            FAMILY_CAREGIVER_PROMPT,
+        ):
+            assert VOICE_AND_AUDIENCE_RULES in prompt
+            assert "ED Doctor: write in concise third-person clinical chart style" in prompt
+            assert "Care Manager: write in third-person care-coordination style" in prompt
+            assert "Patient: for living patients, write directly to the patient using \"you\"" in prompt
+            assert "If the patient is deceased, do not address the patient as \"you\"" in prompt
+            assert "Family Caregiver: for living patients, write to the caregiver" in prompt
+            assert "Never mix voices within the same summary" in prompt
+
+    def test_care_manager_prompt_switches_deceased_patients_to_chart_review(self):
+        assert "For deceased patients, switch to retrospective chart review only" in CARE_MANAGER_PROMPT
+        assert "Do not create new care tasks" in CARE_MANAGER_PROMPT
+        assert "actionable care coordination items only for living patients" in CARE_MANAGER_PROMPT
+        assert "documented before death" in CARE_MANAGER_PROMPT
+        assert "medications at the time of death" in CARE_MANAGER_PROMPT
+        assert "unless a medication period overlaps the death date" in CARE_MANAGER_PROMPT
+        assert "Do not use vague phrases like 'documentation gaps may exist'" in CARE_MANAGER_PROMPT
+        assert "Do not list historical care plans as follow-up needs" in CARE_MANAGER_PROMPT
+
+    def test_section_prompts_place_deceased_details_without_repetition(self):
+        current = _SECTION_PROMPTS["Current Issues"]
+        recent = _SECTION_PROMPTS["Recent Changes"]
+        risks = _SECTION_PROMPTS["Risks and Follow-up"]
+
+        assert "include deceased status and documented cause here once" in current
+        assert "chronological event timeline" in recent
+        assert "do not restate general deceased status from Current Issues" in recent
+        assert "do not repeat death date/cause" in risks
+        assert "Do not summarize diagnoses again" in risks
+        assert "no active follow-up applies" in risks
+        assert "missing vitals/labs raise concerns" in risks
+        assert "retrospective documentation limitations" in risks
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +206,7 @@ class TestRoleValidation:
         "",
         "ED Doctor ",         # trailing space
         " Care Manager",      # leading space
+        "Family caregiver",   # wrong case
         "admin",
         "123",
     ])
@@ -143,7 +246,7 @@ class TestRoleValidation:
         assert "T" in result.generated_at
         assert result.generated_at.endswith("Z")
 
-    @pytest.mark.parametrize("good_role", ["ED Doctor", "Care Manager"])
+    @pytest.mark.parametrize("good_role", list(SUPPORTED_ROLES))
     def test_valid_roles_proceed_past_validation(self, good_role):
         """Valid roles should NOT return the 'Unsupported role' error."""
         agent, _, _, _ = _make_agent()

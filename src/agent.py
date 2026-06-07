@@ -19,19 +19,83 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Role-specific system prompts (Requirements 4.1, 4.2)
+# Role-specific system prompts
 # ---------------------------------------------------------------------------
 
-ED_DOCTOR_PROMPT = (
-    "You are a clinical AI assistant generating a concise patient summary for an Emergency "
-    "Department physician.\n"
-    "Focus on: active diagnoses, current medications and allergies (drug safety), the most recent "
-    "labs and vitals,\n"
-    "and any acute concerns. Be brief, use medical shorthand where appropriate, and highlight "
-    "anything\n"
-    "immediately actionable. Do not include care management goals or long-term follow-up plans.\n"
+DECEASED_RECORD_RULES = """
+If Patient.deceasedDateTime, deceasedBoolean=true, death certification, or cause-of-death data is present:
+- State first that the patient is deceased and summarize retrospectively only.
+- Treat active conditions, medications, and care plans as historical unless clearly documented before death.
+- For diagnoses in a deceased patient, prefer 'FHIR-listed active diagnoses before death' or 'conditions documented before death' instead of unqualified 'active diagnoses'.
+- Do not imply that conditions, medications, or care plans were active at the exact time of death unless supplied dates explicitly support that.
+- Do not say 'medications at the time of death' unless a medication period overlaps the death date.
+- Do NOT recommend active treatment, monitoring, medication adherence work, chronic disease follow-up, self-management, or routine care coordination.
+- Do NOT recommend family support, estate management, bereavement support, caregiver actions, or support for surviving family members unless explicitly documented in the supplied FHIR data.
+- Mention documentation gaps only when the supplied context shows a specific missing or unclear field, such as missing cause of death, missing allergy data, unclear medication dates, or unclear terminal encounter details. Do not use vague phrases like 'documentation gaps may exist'.
+- For deceased patients, do not frame missing recent vitals/labs as an active concern about current clinical status. If relevant, phrase it only as a retrospective documentation limitation, e.g. "No vitals/labs are documented in the supplied data between [date] and death."
+- For Risks and Follow-up, limit content to retrospective chart review: death date/cause clarity, terminal clinical trajectory, medication/allergy safety facts, and specific documentation gaps.
+- Avoid repeating the same death date/cause in every section. Place deceased status in Current Issues, place death/death-certification events in Recent Changes only as dated timeline events, and use Risks and Follow-up only for specific retrospective safety facts or documentation gaps.
+"""
+
+LIVING_PATIENT_RULES = """
+If no Patient.deceasedDateTime, no deceasedBoolean=true, no death certification, and no cause-of-death data is present:
+- Treat the patient as living or death status not documented.
+- Do NOT mention missing death certification, missing cause of death, end-of-life documentation gaps, or death-related follow-up.
+- Do NOT infer end-of-life care needs from the absence of death-related fields.
+"""
+
+VOICE_AND_AUDIENCE_RULES = """
+Voice and audience rules:
+- ED Doctor: write in concise third-person clinical chart style. Use "patient" or the patient's name. Do not address the reader as "you".
+- Care Manager: write in third-person care-coordination style. Use "patient" or the patient's name. Do not address the reader as "you".
+- Patient: for living patients, write directly to the patient using "you" and plain language. If the patient is deceased, do not address the patient as "you"; write retrospectively in third person.
+- Family Caregiver: for living patients, write to the caregiver using "your family member" or "the patient". Do not imply legal authority or caregiving duties not documented in the data. If the patient is deceased, write retrospectively in third person.
+- Never mix voices within the same summary.
+"""
+
+ED_DOCTOR_PROMPT = ( """
+Summarize the supplied FHIR data for an Emergency Department physician in English.
+
+Use only supplied data. Prioritize latest encounter, recent vitals/labs, active/recent diagnoses,
+meds, allergies, and acute safety risks. Ignore billing/insurance/care management goals/care plans unless clinically actionable.
+Recent data > old history. Include dates/key values. Do not invent missing data.
+
+""" + DECEASED_RECORD_RULES + LIVING_PATIENT_RULES + VOICE_AND_AUDIENCE_RULES + """
+
+Recent Changes rules:
+- List clinically relevant events strictly in chronological order, earliest to latest.
+- The last bullet must be the latest documented clinical event.
+
+Be concise: 3-5 bullets per section. Medical shorthand allowed.
+
+Output exactly:
+
+## Current Issues
+- ...
+
+## Recent Changes
+- ...
+
+## Risks and Follow-up
+- ED safety risks, missing critical data, drug/allergy concerns, or retrospective disposition notes only.
+"""
+)
+
+CARE_MANAGER_PROMPT = (
+    "You are a clinical AI assistant generating a patient summary for a Care Manager focused on "
+    "chronic\n"
+    "disease management and care coordination. Focus on: chronic conditions, medication adherence,\n"
+    "pending care plan goals, upcoming follow-up needs, and social/functional risks.\n"
+    "For living patients, include actionable care coordination items.\n"
+    "For deceased patients, switch to retrospective chart review only: death date/cause, final "
+    "clinical trajectory, pre-death diagnoses, medications, allergies, and documentation gaps. "
+    "Do not create new care tasks.\n"
+    "Do not list historical care plans as follow-up needs. For deceased patients, mention care plans "
+    "only as historical context if they directly clarify the terminal course or chart review.\n"
+    "Use plain clinical language. Include actionable care coordination items only for living patients.\n"
     "Use only the supplied FHIR context. Do not invent missing values. Keep each section to "
     "3-5 concise bullet points.\n"
+    + DECEASED_RECORD_RULES + LIVING_PATIENT_RULES + VOICE_AND_AUDIENCE_RULES +
     "\n"
     "Structure your response EXACTLY as:\n"
     "## Current Issues\n"
@@ -44,14 +108,39 @@ ED_DOCTOR_PROMPT = (
     "<bullet points>"
 )
 
-CARE_MANAGER_PROMPT = (
-    "You are a clinical AI assistant generating a patient summary for a Care Manager focused on "
-    "chronic\n"
-    "disease management and care coordination. Focus on: chronic conditions, medication adherence,\n"
-    "pending care plan goals, upcoming follow-up needs, and social/functional risks.\n"
-    "Use plain clinical language. Include actionable care coordination items.\n"
-    "Use only the supplied FHIR context. Do not invent missing values. Keep each section to "
-    "3-5 concise bullet points.\n"
+PATIENT_PROMPT = (
+    "You are a clinical AI assistant generating a patient-facing summary in English.\n"
+    "Use the same supplied FHIR context, but explain it in plain language for the patient.\n"
+    "Avoid medical jargon when possible; when jargon is necessary, briefly explain it.\n"
+    "Focus on what the patient should understand about current health issues, recent changes, "
+    "medicines, allergies, and what questions to ask their clinician.\n"
+    "Use only supplied data. Do not diagnose new conditions, invent missing values, or give "
+    "emergency instructions beyond advising urgent care for clearly documented serious risk.\n"
+    + DECEASED_RECORD_RULES + LIVING_PATIENT_RULES + VOICE_AND_AUDIENCE_RULES +
+    "Keep each section to 3-5 concise bullet points.\n"
+    "\n"
+    "Structure your response EXACTLY as:\n"
+    "## Current Issues\n"
+    "<bullet points>\n"
+    "\n"
+    "## Recent Changes\n"
+    "<bullet points>\n"
+    "\n"
+    "## Risks and Follow-up\n"
+    "<bullet points>"
+)
+
+FAMILY_CAREGIVER_PROMPT = (
+    "You are a clinical AI assistant generating a family caregiver summary in English.\n"
+    "Use the same supplied FHIR context, but explain it for a non-clinician who may help with "
+    "appointments, medication awareness, and safety monitoring.\n"
+    "Focus on practical caregiving implications: active problems, recent changes, medication "
+    "or allergy risks, warning signs documented in the record, and questions to raise with the "
+    "care team.\n"
+    "Use only supplied data. Do not invent missing values. Avoid giving independent medical "
+    "orders or replacing clinician advice.\n"
+    + DECEASED_RECORD_RULES + LIVING_PATIENT_RULES + VOICE_AND_AUDIENCE_RULES +
+    "Keep each section to 3-5 concise bullet points.\n"
     "\n"
     "Structure your response EXACTLY as:\n"
     "## Current Issues\n"
@@ -67,23 +156,34 @@ CARE_MANAGER_PROMPT = (
 _ROLE_PROMPTS: dict[str, str] = {
     "ED Doctor": ED_DOCTOR_PROMPT,
     "Care Manager": CARE_MANAGER_PROMPT,
+    "Patient": PATIENT_PROMPT,
+    "Family Caregiver": FAMILY_CAREGIVER_PROMPT,
 }
+
+SUPPORTED_ROLES = tuple(_ROLE_PROMPTS.keys())
 
 _SECTION_PROMPTS: dict[str, str] = {
     "Current Issues": (
         "Generate only the 'Current Issues' section. Return exactly:\n"
         "## Current Issues\n"
-        "<3-5 concise bullet points>"
+        "<3-5 concise bullet points>\n"
+        "If the patient is deceased, include deceased status and documented cause here once. "
+        "Do not include the death-certification timeline unless it is needed to clarify current retrospective context."
     ),
     "Recent Changes": (
         "Generate only the 'Recent Changes' section. Return exactly:\n"
         "## Recent Changes\n"
-        "<2-4 concise bullet points>"
+        "<2-4 concise bullet points>\n"
+        "For deceased patients, use this section only as a chronological event timeline. "
+        "Mention death or death certification only as dated events, and do not restate general deceased status from Current Issues."
     ),
     "Risks and Follow-up": (
         "Generate only the 'Risks and Follow-up' section. Return exactly:\n"
         "## Risks and Follow-up\n"
-        "<3-5 concise bullet points>"
+        "<3-5 concise bullet points>\n"
+        "For deceased patients, do not repeat death date/cause unless a specific missing or unclear death field is the risk. "
+        "Do not summarize diagnoses again. Focus only on specific retrospective chart-review gaps, medication/allergy safety facts, or state that no active follow-up applies."
+        "Do not write that missing vitals/labs raise concerns about the patient's current clinical status; for deceased patients, describe such items only as retrospective documentation limitations."
     ),
 }
 
@@ -106,14 +206,14 @@ def parse_sections(raw_text: str) -> dict[str, str]:
     ``recent_changes``, and ``risks_and_followup``.  Never raises an
     exception.
 
-    Parsing rules (Requirements 5.1-5.7):
+    Parsing rules:
     - If ``raw_text`` is empty - all three values are empty strings.
     - Lines that exactly equal a recognised ``## Header`` marker start a new
       section; content lines are accumulated until the next header or EOF.
     - Each section value is stripped of leading/trailing whitespace.
     - If ``raw_text`` is non-empty but contains *no* recognised headers, the
       full stripped input is placed in ``risks_and_followup`` and the other
-      two keys are empty strings (Requirement 5.7 fallback).
+      two keys are empty strings.
     """
     result: dict[str, str] = {
         "current_issues": "",
@@ -121,7 +221,7 @@ def parse_sections(raw_text: str) -> dict[str, str]:
         "risks_and_followup": "",
     }
 
-    # Empty input - return all-empty dict immediately (Req 5.4)
+    # Empty input - return all-empty dict immediately.
     if not raw_text:
         return result
 
@@ -144,7 +244,7 @@ def parse_sections(raw_text: str) -> dict[str, str]:
     if current_key is not None:
         result[current_key] = "\n".join(buffer).strip()
 
-    # Req 5.7 fallback: non-empty input with no recognised headers
+    # Fallback: non-empty input with no recognised headers.
     if not found_any_header:
         result["risks_and_followup"] = raw_text.strip()
 
@@ -152,7 +252,7 @@ def parse_sections(raw_text: str) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# FHIR fetch helper (Task 7.2)
+# FHIR fetch helper
 # ---------------------------------------------------------------------------
 
 def _fetch_all_fhir_resources(
@@ -166,17 +266,17 @@ def _fetch_all_fhir_resources(
     fails or yields no results.
 
     Non-Patient resource fetch failures are logged as warnings and the
-    corresponding field is set to an empty list (Requirements 7.1-7.5).
+    corresponding field is set to an empty list.
     """
     # Ordered fetch list: (resource_type, extra_params)
     _FETCH_PLAN = [
         ("Patient",            {"_id": patient_id}),
-        ("Condition",          {"patient": patient_id, "clinical-status": "active"}),
-        ("MedicationRequest",  {"patient": patient_id, "status": "active"}),
+        ("Condition",          {"patient": patient_id, "_count": "100"}),
+        ("MedicationRequest",  {"patient": patient_id, "_sort": "-authoredon", "_count": "150"}),
         ("AllergyIntolerance", {"patient": patient_id}),
-        ("Observation",        {"patient": patient_id, "_sort": "-date", "_count": "20"}),
-        ("Encounter",          {"patient": patient_id, "_sort": "-date", "_count": "5"}),
-        ("CarePlan",           {"patient": patient_id, "status": "active"}),
+        ("Observation",        {"patient": patient_id, "_sort": "-date", "_count": "150"}),
+        ("Encounter",          {"patient": patient_id, "_sort": "-date", "_count": "75"}),
+        ("CarePlan",           {"patient": patient_id, "_count": "50"}),
     ]
 
     results: dict[str, list[dict]] = {}
@@ -192,11 +292,11 @@ def _fetch_all_fhir_resources(
                     patient_id=patient_id,
                     error=f"Failed to fetch Patient {patient_id}: {exc}",
                 )
-            # Non-Patient failure: log and continue (Req 7.1)
+            # Non-Patient failure: log and continue.
             logger.warning("Failed to fetch %s for patient %s: %s", resource_type, patient_id, exc)
             results[resource_type] = []
 
-    # Guard: empty Patient result means the patient doesn't exist (Req 7.2)
+    # Guard: empty Patient result means the patient does not exist.
     if not results.get("Patient"):
         return _error_result(
             patient_id=patient_id,
@@ -235,13 +335,12 @@ def _utc_now_iso() -> str:
 
 
 # ---------------------------------------------------------------------------
-# SummaryAgent (Tasks 7.1 / 7.4)
+# SummaryAgent
 # ---------------------------------------------------------------------------
 
 class SummaryAgent:
     """Orchestrates FHIR retrieval, context extraction, and LLM invocation.
 
-    Requirements: 2.3, 2.4, 4.1-4.5, 6.1-6.7, 7.1-7.5
     """
 
     def __init__(
@@ -260,12 +359,12 @@ class SummaryAgent:
         """Generate a role-specific clinical summary for *patient_id*.
 
         Always returns a ``SummaryResult`` and never raises an unhandled
-        exception (Requirement 6.1).
+        exception.
         """
         generated_at = _utc_now_iso()
 
         try:
-            # --- Role validation (Req 4.3, 6.6, 6.7) ---
+            # --- Role validation ---
             if role not in _ROLE_PROMPTS:
                 return SummaryResult(
                     patient_name="",
@@ -279,7 +378,7 @@ class SummaryAgent:
                     error=f"Unsupported role: {role}",
                 )
 
-            # --- Data-source determination (Req 2.3, 2.4) ---
+            # --- Data-source determination ---
             if self._fhir.is_available():
                 data_source = "fhir_server"
                 fetch_result = _fetch_all_fhir_resources(self._fhir, patient_id)
@@ -303,7 +402,7 @@ class SummaryAgent:
             # --- Extract patient context string ---
             context_text = self._extractor.extract(resources)
 
-            # --- LLM invocation (Task 7.4) ---
+            # --- LLM invocation ---
             system_prompt = _ROLE_PROMPTS[role]
             try:
                 response = self._llm.chat.completions.create(
@@ -337,7 +436,7 @@ class SummaryAgent:
                 error=llm_error,
             )
 
-        except Exception as exc:  # noqa: BLE001 - top-level safety net (Req 6.1)
+        except Exception as exc:  # noqa: BLE001 - top-level safety net
             logger.exception("Unhandled error in generate_summary: %s", exc)
             return SummaryResult(
                 patient_name="",
@@ -459,12 +558,12 @@ class SummaryAgent:
         ]
         sections.append(_source_section(f"Active Conditions ({len(cond_items)})", cond_items))
 
-        # --- Active Medications ---
+        # --- Medication Requests ---
         med_items = [
             self._extractor._format_medication(m).lstrip("- ")
             for m in resources.medications
         ]
-        sections.append(_source_section(f"Active Medications ({len(med_items)})", med_items))
+        sections.append(_source_section(f"Medication Requests ({len(med_items)})", med_items))
 
         # --- Allergies ---
         allergy_items = [

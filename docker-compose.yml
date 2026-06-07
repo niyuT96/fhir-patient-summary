@@ -1,38 +1,29 @@
 services:
+  app:
+    build: .
+    container_name: fhir-patient-summary-app
+    ports:
+      - "7860:7860"
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      IRIS_BASE_URL: ${IRIS_BASE_URL:-http://host.docker.internal:52773/csp/healthshare/fhir/fhir/r4}
+      IRIS_USERNAME: ${IRIS_USERNAME:-superuser}
+      IRIS_PASSWORD: ${IRIS_PASSWORD}
+      FHIR_FALLBACK_PATH: ${FHIR_FALLBACK_PATH:-data}
+      LOAD_SAMPLE_BUNDLE: ${LOAD_SAMPLE_BUNDLE:-false}
+
   iris:
+    profiles:
+      - local-iris
     image: intersystems/irishealth-community:latest-em
-    container_name: fhir-iris
+    container_name: fhir-local-iris
     ports:
       - "52773:52773"
       - "1972:1972"
     volumes:
       - irishealth-durable:/dur
     environment:
-      ISC_DATA_DIRECTORY: /dur/iconfig
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:52773/fhir/r4/metadata"]
-      interval: 5s
-      timeout: 5s
-      retries: 12
-      start_period: 60s
-
-  app:
-    build: .
-    container_name: fhir-app
-    ports:
-      - "7860:7860"
-    environment:
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
-      IRIS_PASSWORD: ${IRIS_PASSWORD}
-      IRIS_BASE_URL: ${IRIS_BASE_URL:-http://localhost:52773/csp/healthshare/fhir/fhir/r4}
-      IRIS_USERNAME: ${IRIS_USERNAME:-superuser}
-      FHIR_FALLBACK_PATH: ${FHIR_FALLBACK_PATH:-data}
-      LOAD_SAMPLE_BUNDLE: ${LOAD_SAMPLE_BUNDLE:-true}
-    depends_on:
-      iris:
-        condition: service_started
-    # If IRIS is unhealthy, the app still starts and falls back to the local
-    # bundle because FHIRClient.is_available() returns False.
+      ISC_DATA_DIRECTORY: /dur
 
 volumes:
   irishealth-durable:
