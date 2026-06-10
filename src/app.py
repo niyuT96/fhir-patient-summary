@@ -241,49 +241,47 @@ def on_generate(
     patient_id = _patient_id_map.get(patient_label, patient_label)
     data_source = _data_source_label
     accumulated_sources: list[SourceSection] = []
+    final_text = ""
+    final_sources_html = ""
 
     for partial_text, source_sections in _agent.generate_summary_stream(patient_id, role):
-        section_count = partial_text.count("## ")
         is_error = partial_text.startswith("**Error:**")
-        is_final = is_error or section_count >= 3
+        final_text = partial_text
 
         if source_sections is not None:
             accumulated_sources = source_sections or []
 
-        sources_html = (
+        final_sources_html = (
             _build_sources_html(accumulated_sources, data_source)
             if accumulated_sources
             else ""
         )
 
-        footer_html = ""
-        if is_final:
-            now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            source_label = (
-                "Source: FHIR Server" if data_source == "fhir_server" else "Source: Local Fallback"
-            )
-            footer_html = (
-                f'<p style="font-size:0.8em;color:#6b7280;">'
-                f"{source_label} &nbsp;|&nbsp; Generated: {_format_generated_at(now_iso)}"
-                "</p>"
-            )
-
-        if not partial_text:
-            status_text = "Reference data ready. Generating Current Issues..."
-        elif section_count <= 1:
-            status_text = "Current Issues ready. Generating Recent Changes..."
-        elif section_count == 2:
-            status_text = "Recent Changes ready. Generating Risks and Follow-up..."
-        else:
-            status_text = ""
-
         yield (
             partial_text,
-            "" if is_final else status_text,
-            footer_html,
-            sources_html,
-            gr.update(interactive=is_final),
+            "" if is_error else "Generating summary...",
+            "",
+            final_sources_html,
+            gr.update(interactive=False),
         )
+
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    source_label = (
+        "Source: FHIR Server" if data_source == "fhir_server" else "Source: Local Fallback"
+    )
+    footer_html = (
+        f'<p style="font-size:0.8em;color:#6b7280;">'
+        f"{source_label} &nbsp;|&nbsp; Generated: {_format_generated_at(now_iso)}"
+        "</p>"
+    )
+
+    yield (
+        final_text,
+        "",
+        footer_html if final_text else "",
+        final_sources_html,
+        gr.update(interactive=True),
+    )
 
 
 # ---------------------------------------------------------------------------

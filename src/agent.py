@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -218,32 +219,21 @@ _ROLE_PROMPTS: dict[str, str] = {
 
 SUPPORTED_ROLES = tuple(_ROLE_PROMPTS.keys())
 
-_SECTION_PROMPTS: dict[str, str] = {
-    "Current Issues": (
-        "Generate only the 'Current Issues' section. Return exactly:\n"
-        "## Current Issues\n"
-        "<3-5 concise bullet points>\n"
-        "If the patient is deceased, include deceased status and documented cause here once. "
-        "Do not include the death-certification timeline unless it is needed to clarify current retrospective context."
-    ),
-    "Recent Changes": (
-        "Generate only the 'Recent Changes' section. Return exactly:\n"
-        "## Recent Changes\n"
-        "<2-4 concise bullet points>\n"
-        "For deceased patients, use this section only as a chronological event timeline. "
-        "Mention death or death certification only as dated events, and do not restate general deceased status from Current Issues."
-    ),
-    "Risks and Follow-up": (
-        "Generate only the 'Risks and Follow-up' section. Return exactly:\n"
-        "## Risks and Follow-up\n"
-        "<3-5 concise bullet points>\n"
-        "For deceased patients, do not repeat death date/cause unless a specific missing or unclear death field is the risk. "
-        "Do not summarize diagnoses again. Focus only on specific retrospective chart-review gaps, medication/allergy safety facts, or state that no active follow-up applies."
-        "Do not write that missing vitals/labs raise concerns about the patient's current clinical status; for deceased patients, describe such items only as retrospective documentation limitations."
-    ),
-}
+SUMMARY_OUTPUT_RULES = """
+Return one complete summary with exactly these sections:
 
-_SECTION_ORDER = ["Current Issues", "Recent Changes", "Risks and Follow-up"]
+## Current Issues
+- bullets
+
+## Recent Changes
+- bullets, chronological order, latest to earliest
+
+## Risks and Follow-up
+- bullets
+
+Do not add any other headings.
+Use only the supplied FHIR context.
+"""
 
 # ---------------------------------------------------------------------------
 # Header - key mapping (case-sensitive, must match exactly on their own line)
@@ -411,101 +401,6 @@ class SummaryAgent:
         self._llm = llm_client
         self._llm_client = llm_client  # alias for test compatibility
 
-    def generate_summary(self, patient_id: str, role: str) -> SummaryResult:
-        """Generate a role-specific clinical summary for *patient_id*.
-
-        Always returns a ``SummaryResult`` and never raises an unhandled
-        exception.
-        """
-        generated_at = _utc_now_iso()
-
-        try:
-            # --- Role validation ---
-            if role not in _ROLE_PROMPTS:
-                return SummaryResult(
-                    patient_name="",
-                    patient_id=patient_id,
-                    role=role,
-                    current_issues="",
-                    recent_changes="",
-                    risks_and_followup="",
-                    data_source="fhir_server",
-                    generated_at=generated_at,
-                    error=f"Unsupported role: {role}",
-                )
-
-            # --- Data-source determination ---
-            if self._fhir.is_available():
-                data_source = "fhir_server"
-                fetch_result = _fetch_all_fhir_resources(self._fhir, patient_id)
-                # _fetch_all_fhir_resources may return an error SummaryResult
-                if isinstance(fetch_result, SummaryResult):
-                    # Patch in the correct metadata
-                    fetch_result.role = role
-                    fetch_result.data_source = data_source
-                    fetch_result.generated_at = generated_at
-                    return fetch_result
-                resources: PatientResources = fetch_result
-            else:
-                data_source = "local_fallback"
-                resources = self._load_fallback_resources(patient_id)
-                if isinstance(resources, SummaryResult):
-                    resources.role = role
-                    resources.data_source = data_source
-                    resources.generated_at = generated_at
-                    return resources
-
-            # --- Extract patient context string ---
-            context_text = self._extractor.extract(resources)
-            # --- LLM invocation ---
-            system_prompt = _ROLE_PROMPTS[role]
-            config = _get_model_config()
-            try:
-                response = self._llm.chat.completions.create(
-                    model=config.model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": context_text},
-                    ],
-                    temperature=config.temperature,
-                    max_tokens=config.max_tokens,
-                )
-                raw_text = response.choices[0].message.content
-                sections = parse_sections(raw_text)
-                llm_error: str | None = None
-            except Exception as llm_exc:  # noqa: BLE001
-                sections = {"current_issues": "", "recent_changes": "", "risks_and_followup": ""}
-                llm_error = str(llm_exc)
-
-            # --- Extract patient name for result ---
-            patient_name = self._extract_patient_name(resources.patient)
-
-            return SummaryResult(
-                patient_name=patient_name,
-                patient_id=patient_id,
-                role=role,
-                current_issues=sections["current_issues"],
-                recent_changes=sections["recent_changes"],
-                risks_and_followup=sections["risks_and_followup"],
-                data_source=data_source,
-                generated_at=generated_at,
-                error=llm_error,
-            )
-
-        except Exception as exc:  # noqa: BLE001 - top-level safety net
-            logger.exception("Unhandled error in generate_summary: %s", exc)
-            return SummaryResult(
-                patient_name="",
-                patient_id=patient_id,
-                role=role,
-                current_issues="",
-                recent_changes="",
-                risks_and_followup="",
-                data_source="fhir_server",
-                generated_at=generated_at,
-                error=str(exc),
-            )
-
     # ---------------------------------------------------------------------- #
     # Private helpers                                                         #
     # ---------------------------------------------------------------------- #
@@ -666,11 +561,11 @@ class SummaryAgent:
     # ---------------------------------------------------------------------- #
 
     def generate_summary_stream(self, patient_id: str, role: str):
-        """Generate the summary section by section.
+        """Stream a role-specific clinical summary.
 
         Yields tuples of (partial_markdown: str, source_sections: list[SourceSection] | None).
         - First yield carries source_sections immediately after FHIR data is ready.
-        - Each completed section is yielded immediately so the UI can update.
+        - Later yields carry accumulated markdown from a single OpenAI stream.
         Never raises; errors are surfaced as a final plain-text yield with source_sections=[].
         """
         if role not in _ROLE_PROMPTS:
@@ -699,49 +594,67 @@ class SummaryAgent:
 
         source_sections = self._build_source_sections(resources)
         context_text = self._extractor.extract(resources)
-        base_prompt = _ROLE_PROMPTS[role]
 
         # Let the UI show reference data before waiting for any LLM response.
         yield "", source_sections
 
         try:
-            rendered_sections: list[str] = []
-            for section_name in _SECTION_ORDER:
-                section_text = self._generate_one_section(
-                    base_prompt=base_prompt,
-                    section_name=section_name,
-                    context_text=context_text,
-                )
-                rendered_sections.append(section_text)
-                partial_markdown = "\n\n".join(rendered_sections)
-                yield partial_markdown, source_sections
+            config = _get_model_config()
+            stream = self._llm.chat.completions.create(
+                model=config.model,
+                messages=[
+                    {"role": "system", "content": _ROLE_PROMPTS[role]},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"{SUMMARY_OUTPUT_RULES}\n\n"
+                            "FHIR patient context:\n"
+                            f"{context_text}"
+                        ),
+                    },
+                ],
+                temperature=config.temperature,
+                max_tokens=config.max_tokens,
+                stream=True,
+            )
+
+            accumulated = ""
+            first_chunk_seen = False
+            last_yield_at = time.monotonic()
+
+            for chunk in stream:
+                delta = _extract_stream_delta(chunk)
+                if not delta:
+                    continue
+
+                accumulated += delta
+                now = time.monotonic()
+
+                if not first_chunk_seen:
+                    first_chunk_seen = True
+                    last_yield_at = now
+                    yield accumulated, source_sections
+                    continue
+
+                if now - last_yield_at >= config.stream_throttle_seconds:
+                    last_yield_at = now
+                    yield accumulated, source_sections
+
+            if accumulated:
+                yield accumulated, source_sections
 
         except Exception as llm_exc:  # noqa: BLE001
-            logger.exception("LLM section generation error: %s", llm_exc)
+            logger.exception("LLM stream generation error: %s", llm_exc)
             yield f"**Error:** {llm_exc}", []
 
-    def _generate_one_section(
-        self,
-        base_prompt: str,
-        section_name: str,
-        context_text: str,
-    ) -> str:
-        """Generate one named summary section with a separate LLM request."""
-        config = _get_model_config()
-        response = self._llm.chat.completions.create(
-            model=config.model,
-            messages=[
-                {"role": "system", "content": base_prompt},
-                {
-                    "role": "user",
-                    "content": (
-                        f"{_SECTION_PROMPTS[section_name]}\n\n"
-                        "FHIR patient context:\n"
-                        f"{context_text}"
-                    ),
-                },
-            ],
-            temperature=config.temperature,
-            max_tokens=config.max_tokens,
-        )
-        return response.choices[0].message.content.strip()
+
+def _extract_stream_delta(chunk) -> str:
+    """Extract text content from an OpenAI streaming chat completion chunk."""
+    try:
+        choices = getattr(chunk, "choices", None)
+        if not choices:
+            return ""
+        delta = getattr(choices[0], "delta", None)
+        return getattr(delta, "content", None) or ""
+    except (AttributeError, IndexError, TypeError):
+        return ""
