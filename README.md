@@ -52,7 +52,8 @@ The workflow uses these FHIR resource types:
 - Lets the user select a patient and a summary role. Patient dropdown labels
   include name, DOB, and age; duplicate labels add a short Patient ID while the
   app still uses the full `Patient.id` internally.
-- Generates the three required summary sections.
+- Streams a single OpenAI summary request into the UI as markdown is produced.
+- Generates the three required summary sections in one model response.
 - Shows compact Reference Data Sources so judges can inspect which FHIR values
   were used.
 - Supports multiple local patient JSON bundles in the `data/` directory.
@@ -83,7 +84,7 @@ Main components:
 - `src.fhir_loader`: posts local FHIR transaction bundles into IRIS.
 - `src.fhir_client`: reads FHIR resources from IRIS or from local fallback JSON.
 - `src.context_extractor`: converts FHIR resources into compact clinical text.
-- `src.agent`: selects the role prompt and calls the OpenAI model.
+- `src.agent`: selects the role prompt and calls the OpenAI streaming API.
 - `src.app`: Gradio web UI.
 
 For Open Exchange usage, the Docker Compose default starts only the web app.
@@ -101,11 +102,12 @@ Users connect it to their own IRIS for Health or HealthShare FHIR endpoint with
    `Family Caregiver`.
 7. The application extracts patient demographics, conditions, medications,
    allergies, observations, encounters, and care plans.
-8. The AI agent generates three sections:
+8. The AI agent makes one streaming OpenAI request and generates three sections:
    - Current Issues
    - Recent Changes
    - Risks and Follow-up
-9. The UI displays the generated summary and expandable reference source data.
+9. The UI updates accumulated markdown as chunks arrive and displays
+   expandable reference source data.
 
 ## Using the App
 
@@ -394,6 +396,12 @@ The prompt is role-specific:
 The application sends the same extracted FHIR patient context to the model for
 all roles. The selected role changes the system prompt, so the output is framed
 for an ED doctor, care manager, patient, or family caregiver.
+
+Summary generation uses the OpenAI streaming API. The app sends one request
+with `stream=True`, then renders accumulated markdown as chunks arrive. The
+generate button stays disabled while streaming and is re-enabled when the
+generator finishes or returns an error; completion is not inferred from the
+number of markdown section headings.
 
 ## Testing
 

@@ -164,6 +164,77 @@ class TestStreamingSummary:
         extractor.extract.assert_not_called()
         llm.chat.completions.create.assert_not_called()
 
+    def test_local_fallback_resources_are_filtered_to_selected_patient(self):
+        selected_patient = {
+            "resourceType": "Patient",
+            "id": "p1",
+            "name": [{"text": "Selected Patient"}],
+        }
+        other_patient = {
+            "resourceType": "Patient",
+            "id": "p2",
+            "name": [{"text": "Other Patient"}],
+        }
+        selected_condition = {
+            "resourceType": "Condition",
+            "id": "c1",
+            "subject": {"reference": "Patient/p1"},
+            "code": {"text": "Selected condition"},
+        }
+        other_condition = {
+            "resourceType": "Condition",
+            "id": "c2",
+            "subject": {"reference": "Patient/p2"},
+            "code": {"text": "Other condition"},
+        }
+        fhir = MagicMock()
+        fhir.is_available.return_value = False
+        fhir._load_fallback_bundle.return_value = [
+            selected_patient,
+            other_patient,
+            selected_condition,
+            other_condition,
+        ]
+        extractor = _make_extractor()
+        extractor._format_condition.return_value = "- Selected condition"
+        llm = _make_llm_stream("## Current Issues\n- Selected condition")
+        agent = SummaryAgent(fhir_client=fhir, extractor=extractor, llm_client=llm)
+
+        chunks = list(agent.generate_summary_stream("p1", "ED Doctor"))
+
+        resources = extractor.extract.call_args.args[0]
+        assert isinstance(resources, PatientResources)
+        assert resources.patient == selected_patient
+        assert resources.conditions == [selected_condition]
+        assert chunks[0][1][0].items == ["Selected condition"]
+        assert chunks[-1][0] == "## Current Issues\n- Selected condition"
+
+    def test_local_fallback_resources_match_urn_uuid_patient_references(self):
+        patient_id = "9e43a3bf-fb4f-4007-8a1f-d8e00e57d4e5"
+        selected_patient = {
+            "resourceType": "Patient",
+            "id": patient_id,
+            "name": [{"text": "Allen Runte"}],
+        }
+        selected_condition = {
+            "resourceType": "Condition",
+            "id": "condition-1",
+            "subject": {"reference": f"urn:uuid:{patient_id}"},
+            "code": {"text": "Hypertension"},
+        }
+        fhir = MagicMock()
+        fhir.is_available.return_value = False
+        fhir._load_fallback_bundle.return_value = [selected_patient, selected_condition]
+        extractor = _make_extractor()
+        llm = _make_llm_stream("## Current Issues\n- Hypertension")
+        agent = SummaryAgent(fhir_client=fhir, extractor=extractor, llm_client=llm)
+
+        list(agent.generate_summary_stream(patient_id, "ED Doctor"))
+
+        resources = extractor.extract.call_args.args[0]
+        assert isinstance(resources, PatientResources)
+        assert resources.conditions == [selected_condition]
+
     def test_source_sections_are_yielded_before_llm_markdown(self):
         agent, _, _, _ = _make_agent(stream_contents=("A", "B"))
 
@@ -183,6 +254,24 @@ class TestStreamingSummary:
         assert call_kwargs["stream"] is True
         assert SUMMARY_OUTPUT_RULES.strip() in call_kwargs["messages"][1]["content"]
         assert chunks[-1][0] == "## Current Issues\n- BP high"
+
+    def test_streaming_throttles_intermediate_yields_but_keeps_first_and_final(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("STREAM_THROTTLE_SECONDS", "0.2")
+        timestamps = iter([0.0, 0.0, 0.05, 0.19, 0.21])
+        monkeypatch.setattr("src.agent.time.monotonic", lambda: next(timestamps))
+        agent, _, _, _ = _make_agent(stream_contents=("A", "B", "C", "D"))
+
+        chunks = list(agent.generate_summary_stream("patient-001", "ED Doctor"))
+        markdown_chunks = [chunk[0] for chunk in chunks[1:]]
+
+        assert markdown_chunks[0] == "A"
+        assert markdown_chunks[-1] == "ABCD"
+        assert "AB" not in markdown_chunks
+        assert "ABC" not in markdown_chunks
+        assert len(markdown_chunks) < 4
 
     def test_streaming_call_uses_system_and_user_messages(self):
         agent, _, _, llm = _make_agent()
@@ -216,6 +305,11 @@ class TestStreamingSummary:
 class TestStreamDeltaExtraction:
     def test_extracts_delta_content(self):
         assert _extract_stream_delta(_stream_chunk("hello")) == "hello"
+
+    def test_extracts_delta_content_from_dict_chunk(self):
+        chunk = {"choices": [{"delta": {"content": "hello"}}]}
+
+        assert _extract_stream_delta(chunk) == "hello"
 
     @pytest.mark.parametrize("chunk", [MagicMock(choices=[]), object(), None])
     def test_missing_delta_content_returns_empty_string(self, chunk):

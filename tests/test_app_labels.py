@@ -100,3 +100,82 @@ def test_sources_html_keeps_hidden_items_expandable(monkeypatch):
     assert "Show 1 more" in html
     assert "<li>D</li>" in html
     assert "...and" not in html
+
+
+def test_on_generate_uses_generator_end_as_completion_signal(monkeypatch):
+    app = _load_app_module(monkeypatch)
+
+    class FakeAgent:
+        def generate_summary_stream(self, patient_id, role):
+            assert patient_id == "patient-001"
+            assert role == "ED Doctor"
+            yield "", [
+                SourceSection(
+                    label="Active Conditions (1)",
+                    items=["Hypertension"],
+                )
+            ]
+            yield "## Current Issues\n- Hypertension", [
+                SourceSection(
+                    label="Active Conditions (1)",
+                    items=["Hypertension"],
+                )
+            ]
+
+    monkeypatch.setattr(app, "_agent", FakeAgent())
+    monkeypatch.setattr(app, "_patient_id_map", {"Jane Doe": "patient-001"})
+    monkeypatch.setattr(app, "_data_source_label", "local_fallback")
+
+    outputs = list(app.on_generate("Jane Doe", "ED Doctor"))
+
+    assert outputs[0][1] == "Preparing FHIR reference data..."
+    assert outputs[0][4]["interactive"] is False
+    assert outputs[1][1] == "Generating summary..."
+    assert "Active Conditions" in outputs[1][3]
+    assert outputs[2][0] == "## Current Issues\n- Hypertension"
+    assert outputs[2][1] == "Generating summary..."
+    assert outputs[2][4]["interactive"] is False
+    assert outputs[-1][0] == "## Current Issues\n- Hypertension"
+    assert outputs[-1][1] == ""
+    assert "Generated:" in outputs[-1][2]
+    assert outputs[-1][4]["interactive"] is True
+
+
+def test_on_generate_recovers_button_if_agent_yields_nothing(monkeypatch):
+    app = _load_app_module(monkeypatch)
+
+    class EmptyAgent:
+        def generate_summary_stream(self, patient_id, role):
+            return
+            yield
+
+    monkeypatch.setattr(app, "_agent", EmptyAgent())
+    monkeypatch.setattr(app, "_patient_id_map", {"Jane Doe": "patient-001"})
+
+    outputs = list(app.on_generate("Jane Doe", "ED Doctor"))
+
+    assert outputs[0][4]["interactive"] is False
+    assert outputs[-1][0] == ""
+    assert outputs[-1][1] == ""
+    assert outputs[-1][2] == ""
+    assert outputs[-1][4]["interactive"] is True
+
+
+def test_on_generate_displays_error_and_restores_button(monkeypatch):
+    app = _load_app_module(monkeypatch)
+
+    class ErrorAgent:
+        def generate_summary_stream(self, patient_id, role):
+            yield "**Error:** Rate limit exceeded", []
+
+    monkeypatch.setattr(app, "_agent", ErrorAgent())
+    monkeypatch.setattr(app, "_patient_id_map", {"Jane Doe": "patient-001"})
+
+    outputs = list(app.on_generate("Jane Doe", "ED Doctor"))
+
+    assert outputs[1][0] == "**Error:** Rate limit exceeded"
+    assert outputs[1][1] == ""
+    assert outputs[1][4]["interactive"] is False
+    assert outputs[-1][0] == "**Error:** Rate limit exceeded"
+    assert outputs[-1][1] == ""
+    assert outputs[-1][4]["interactive"] is True

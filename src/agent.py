@@ -120,8 +120,8 @@ Recent data > old history. Include dates/key values. Do not invent missing data.
 """ + DECEASED_RECORD_RULES + LIVING_PATIENT_RULES + VOICE_AND_AUDIENCE_RULES + """
 
 Recent Changes rules:
-- List clinically relevant events strictly in chronological order, earliest to latest.
-- The last bullet must be the latest documented clinical event.
+- List clinically relevant events in chronological order, latest to earliest.
+- The first bullet must be the latest documented clinical event.
 
 Be concise: 3-5 bullets per section. Medical shorthand allowed.
 
@@ -650,6 +650,14 @@ class SummaryAgent:
 
 def _extract_stream_delta(chunk) -> str:
     """Extract text content from an OpenAI streaming chat completion chunk."""
+    if isinstance(chunk, dict):
+        try:
+            choices = chunk.get("choices") or []
+            delta = choices[0].get("delta") or {}
+            return delta.get("content") or ""
+        except (AttributeError, IndexError, TypeError):
+            return ""
+
     try:
         choices = getattr(chunk, "choices", None)
         if not choices:
