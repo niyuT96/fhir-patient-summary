@@ -429,11 +429,11 @@ team.
 | Field | Value |
 |---|---|
 | GitHub or GitLab URL | https://github.com/niyuT96/fhir-patient-summary |
-| Open Exchange URL | To be added after publication |
+| Open Exchange URL | https://openexchange.intersystems.com/package/fhir-patient-summary |
 | Demo video URL | https://youtu.be/rOKGINwaqDU |
 | Team member DC profiles | Jan Rheineck: https://community.intersystems.com/user/jan-rheineck; Niyu Tong: https://community.intersystems.com/user/niyu-tong |
 | Contest task | Smart Patient Summary Generator |
-| InterSystems product | InterSystems IRIS for Health / HealthShare FHIR |
+| InterSystems product | InterSystems IRIS for Health  |
 
 Suggested short description:
 
