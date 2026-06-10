@@ -49,7 +49,9 @@ The workflow uses these FHIR resource types:
   endpoint is available.
 - Falls back to local synthetic/public FHIR sample bundles when IRIS is not
   available.
-- Lets the user select a patient and a summary role.
+- Lets the user select a patient and a summary role. Patient dropdown labels
+  include name, DOB, and age; duplicate labels add a short Patient ID while the
+  app still uses the full `Patient.id` internally.
 - Generates the three required summary sections.
 - Shows compact Reference Data Sources so judges can inspect which FHIR values
   were used.
@@ -191,6 +193,10 @@ IRIS_PASSWORD=SYS
 IRIS_BASE_URL=http://localhost:52773/csp/healthshare/fhir/fhir/r4
 FHIR_FALLBACK_PATH=data
 LOAD_SAMPLE_BUNDLE=false
+OPENAI_MODEL=gpt-4o-mini
+OPENAI_TEMPERATURE=0.3
+OPENAI_MAX_TOKENS=800
+STREAM_THROTTLE_SECONDS=0.2
 ```
 
 Important environment variables:
@@ -198,6 +204,10 @@ Important environment variables:
 | Variable | Purpose |
 |---|---|
 | `OPENAI_API_KEY` | Required. Used by the OpenAI client. |
+| `OPENAI_MODEL` | OpenAI model used for summary generation. Default is `gpt-4o-mini`. |
+| `OPENAI_TEMPERATURE` | Model temperature. Default is `0.3`. |
+| `OPENAI_MAX_TOKENS` | Maximum tokens for each model response. Default is `800`. |
+| `STREAM_THROTTLE_SECONDS` | Streaming UI throttle interval in seconds. Default is `0.2`. |
 | `IRIS_BASE_URL` | IRIS FHIR R4 endpoint. |
 | `IRIS_USERNAME` | IRIS basic-auth username. |
 | `IRIS_PASSWORD` | IRIS basic-auth password. |
@@ -345,14 +355,33 @@ FHIR server and no sample data should be written.
 The local sample data is synthetic/public FHIR sample data. Do not add real
 patient data to this repository.
 
-## Model and Prompts
+## Patient Selection
 
-The model is configured in `src.agent`.
-
-Current model:
+The patient dropdown is built from readable labels:
 
 ```text
-gpt-4o-mini
+Jane Doe | DOB: 1980-01-01 | Age: 46
+```
+
+If two patients have the same base label, the UI appends a short Patient ID:
+
+```text
+Jane Doe | DOB: 1980-01-01 | Age: 46 | ID: abc12345
+```
+
+The label is only for display. Internally, the app maps the selected unique
+label to the full `Patient.id`.
+
+## Model and Prompts
+
+Model settings are centralized in `src.agent` and can be overridden with
+environment variables:
+
+```env
+OPENAI_MODEL=gpt-4o-mini
+OPENAI_TEMPERATURE=0.3
+OPENAI_MAX_TOKENS=800
+STREAM_THROTTLE_SECONDS=0.2
 ```
 
 The prompt is role-specific:

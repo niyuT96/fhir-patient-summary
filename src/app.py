@@ -6,6 +6,7 @@ Gradio UI for patient selection, role selection, and summary display.
 from __future__ import annotations
 
 import os
+from collections import Counter
 from datetime import date, datetime, timezone
 from typing import Generator
 
@@ -88,13 +89,62 @@ def _patient_age(patient: dict, today: date | None = None) -> int | None:
     return age
 
 
-def _patient_label(patient: dict) -> str:
-    """Build a dropdown label using only patient name and age."""
+def _patient_label_base(patient: dict) -> str:
+    """Build the readable patient label without an ID suffix."""
     name = _patient_name(patient)
+    birth_date = patient.get("birthDate") or "unknown"
     age = _patient_age(patient)
-    if age is None:
-        return f"{name} (age unknown)"
-    return f"{name} ({age})"
+    age_label = str(age) if age is not None else "unknown"
+    return f"{name} | DOB: {birth_date} | Age: {age_label}"
+
+
+def _patient_label(patient: dict) -> str:
+    """Backward-compatible label helper for non-duplicate patients."""
+    return _patient_label_base(patient)
+
+
+def _short_patient_id(patient: dict) -> str:
+    """Return a readable short Patient.id for duplicate labels."""
+    patient_id = str(patient.get("id") or "").strip()
+    return patient_id[:8] if patient_id else "unknown"
+
+
+def _build_patient_choices_and_id_map(patients: list[dict]) -> tuple[list[str], dict[str, str]]:
+    """Build unique dropdown choices and map each label to the full Patient.id."""
+    base_labels = [_patient_label_base(patient) for patient in patients]
+    base_counts = Counter(base_labels)
+
+    labels: list[str] = []
+    for patient, base_label in zip(patients, base_labels):
+        label = base_label
+        if base_counts[base_label] > 1:
+            label = f"{base_label} | ID: {_short_patient_id(patient)}"
+        labels.append(label)
+
+    # Short IDs are usually enough, but guard against short-ID collisions.
+    if len(set(labels)) != len(labels):
+        seen: Counter[str] = Counter()
+        unique_labels: list[str] = []
+        for patient, label in zip(patients, labels):
+            seen[label] += 1
+            if seen[label] == 1 and labels.count(label) == 1:
+                unique_labels.append(label)
+                continue
+            patient_id = str(patient.get("id") or "unknown")
+            unique_labels.append(f"{label} | Full ID: {patient_id}")
+        labels = unique_labels
+
+    if len(set(labels)) != len(labels):
+        indexed_labels: list[str] = []
+        for index, label in enumerate(labels, start=1):
+            indexed_labels.append(f"{label} | #{index}")
+        labels = indexed_labels
+
+    id_map = {
+        label: str(patient.get("id") or "")
+        for label, patient in zip(labels, patients)
+    }
+    return labels, id_map
 
 
 def _build_sources_html(sections: list[SourceSection], data_source: str) -> str:
@@ -160,10 +210,7 @@ _source_badge_html = (
     'border-radius:12px;font-size:0.85em;font-weight:600;">Local Fallback</span>'
 )
 
-_patient_choices: list[str] = [_patient_label(patient) for patient in _patients]
-_patient_id_map: dict[str, str] = {
-    _patient_label(patient): patient.get("id", "") for patient in _patients
-}
+_patient_choices, _patient_id_map = _build_patient_choices_and_id_map(_patients)
 
 _data_source_label = "fhir_server" if _server_available else "local_fallback"
 
@@ -261,7 +308,7 @@ with gr.Blocks(title="Smart Patient Summary Generator") as demo:
         with gr.Column(scale=1):
             patient_dropdown = gr.Dropdown(
                 choices=_patient_choices if _patient_choices else ["No patients available"],
-                label="Patient (Age)",
+                label="Patient",
                 value=None,
                 interactive=bool(_patient_choices),
             )

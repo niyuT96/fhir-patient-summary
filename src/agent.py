@@ -6,6 +6,8 @@ LLM invocation to produce a SummaryResult.
 from __future__ import annotations
 
 import logging
+import os
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -17,6 +19,60 @@ if TYPE_CHECKING:
     from src.fhir_client import FHIRClient
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+DEFAULT_OPENAI_TEMPERATURE = 0.3
+DEFAULT_OPENAI_MAX_TOKENS = 800
+STREAM_THROTTLE_SECONDS = 0.2
+
+
+@dataclass(frozen=True)
+class ModelConfig:
+    model: str
+    temperature: float
+    max_tokens: int
+    stream_throttle_seconds: float
+
+
+def _env_float(name: str, default: float, *, minimum: float | None = None) -> float:
+    raw_value = os.environ.get(name, "").strip()
+    if not raw_value:
+        return default
+    try:
+        value = float(raw_value)
+    except ValueError:
+        return default
+    if minimum is not None and value < minimum:
+        return default
+    return value
+
+
+def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
+    raw_value = os.environ.get(name, "").strip()
+    if not raw_value:
+        return default
+    try:
+        value = int(raw_value)
+    except ValueError:
+        return default
+    if minimum is not None and value < minimum:
+        return default
+    return value
+
+
+def _get_model_config() -> ModelConfig:
+    """Read OpenAI model settings from environment variables with safe fallbacks."""
+    model = os.environ.get("OPENAI_MODEL", "").strip() or DEFAULT_OPENAI_MODEL
+    return ModelConfig(
+        model=model,
+        temperature=_env_float("OPENAI_TEMPERATURE", DEFAULT_OPENAI_TEMPERATURE),
+        max_tokens=_env_int("OPENAI_MAX_TOKENS", DEFAULT_OPENAI_MAX_TOKENS, minimum=1),
+        stream_throttle_seconds=_env_float(
+            "STREAM_THROTTLE_SECONDS",
+            STREAM_THROTTLE_SECONDS,
+            minimum=0,
+        ),
+    )
 
 # ---------------------------------------------------------------------------
 # Role-specific system prompts
@@ -401,18 +457,18 @@ class SummaryAgent:
 
             # --- Extract patient context string ---
             context_text = self._extractor.extract(resources)
-
             # --- LLM invocation ---
             system_prompt = _ROLE_PROMPTS[role]
+            config = _get_model_config()
             try:
                 response = self._llm.chat.completions.create(
-                    model="gpt-4o-mini",
+                    model=config.model,
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": context_text},
                     ],
-                    temperature=0.3,
-                    max_tokens=800,
+                    temperature=config.temperature,
+                    max_tokens=config.max_tokens,
                 )
                 raw_text = response.choices[0].message.content
                 sections = parse_sections(raw_text)
@@ -671,8 +727,9 @@ class SummaryAgent:
         context_text: str,
     ) -> str:
         """Generate one named summary section with a separate LLM request."""
+        config = _get_model_config()
         response = self._llm.chat.completions.create(
-            model="gpt-4o-mini",
+            model=config.model,
             messages=[
                 {"role": "system", "content": base_prompt},
                 {
@@ -684,7 +741,7 @@ class SummaryAgent:
                     ),
                 },
             ],
-            temperature=0.3,
-            max_tokens=300,
+            temperature=config.temperature,
+            max_tokens=config.max_tokens,
         )
         return response.choices[0].message.content.strip()

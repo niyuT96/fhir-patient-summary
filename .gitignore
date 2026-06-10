@@ -29,3 +29,4 @@ data/loaded-patient-ids.json
 # Python cache
 __pycache__/
 .pytest_cache/
+*_CN.*

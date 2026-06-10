@@ -20,7 +20,16 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.agent import SummaryAgent, _fetch_all_fhir_resources, parse_sections
+from src.agent import (
+    DEFAULT_OPENAI_MAX_TOKENS,
+    DEFAULT_OPENAI_MODEL,
+    DEFAULT_OPENAI_TEMPERATURE,
+    STREAM_THROTTLE_SECONDS,
+    SummaryAgent,
+    _fetch_all_fhir_resources,
+    _get_model_config,
+    parse_sections,
+)
 from src.context_extractor import PatientContextExtractor
 from src.exceptions import FHIRClientError, FHIRUnavailableError
 from src.models import PatientResources, SummaryResult
@@ -481,13 +490,41 @@ class TestLLMInvocation:
         assert result.recent_changes == ""
         assert result.risks_and_followup == ""
 
-    def test_llm_called_with_correct_model_and_params(self):
+    def test_default_model_config_is_used_for_llm_call(self, monkeypatch):
+        monkeypatch.delenv("OPENAI_MODEL", raising=False)
+        monkeypatch.delenv("OPENAI_TEMPERATURE", raising=False)
+        monkeypatch.delenv("OPENAI_MAX_TOKENS", raising=False)
+        monkeypatch.delenv("STREAM_THROTTLE_SECONDS", raising=False)
         agent, _, _, llm = _make_agent()
         agent.generate_summary("patient-001", "ED Doctor")
         call_kwargs = llm.chat.completions.create.call_args
-        assert call_kwargs.kwargs["model"] == "gpt-4o-mini"
-        assert call_kwargs.kwargs["temperature"] == 0.3
-        assert call_kwargs.kwargs["max_tokens"] == 800
+        assert call_kwargs.kwargs["model"] == DEFAULT_OPENAI_MODEL
+        assert call_kwargs.kwargs["temperature"] == DEFAULT_OPENAI_TEMPERATURE
+        assert call_kwargs.kwargs["max_tokens"] == DEFAULT_OPENAI_MAX_TOKENS
+
+    def test_environment_model_config_overrides_are_used_for_llm_call(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_MODEL", "test-model")
+        monkeypatch.setenv("OPENAI_TEMPERATURE", "0.7")
+        monkeypatch.setenv("OPENAI_MAX_TOKENS", "1234")
+        monkeypatch.setenv("STREAM_THROTTLE_SECONDS", "0.05")
+        agent, _, _, llm = _make_agent()
+        agent.generate_summary("patient-001", "ED Doctor")
+        call_kwargs = llm.chat.completions.create.call_args
+        assert call_kwargs.kwargs["model"] == "test-model"
+        assert call_kwargs.kwargs["temperature"] == 0.7
+        assert call_kwargs.kwargs["max_tokens"] == 1234
+        assert _get_model_config().stream_throttle_seconds == 0.05
+
+    def test_invalid_environment_model_config_falls_back_to_defaults(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_MODEL", "   ")
+        monkeypatch.setenv("OPENAI_TEMPERATURE", "not-a-float")
+        monkeypatch.setenv("OPENAI_MAX_TOKENS", "0")
+        monkeypatch.setenv("STREAM_THROTTLE_SECONDS", "-0.1")
+        config = _get_model_config()
+        assert config.model == DEFAULT_OPENAI_MODEL
+        assert config.temperature == DEFAULT_OPENAI_TEMPERATURE
+        assert config.max_tokens == DEFAULT_OPENAI_MAX_TOKENS
+        assert config.stream_throttle_seconds == STREAM_THROTTLE_SECONDS
 
     def test_llm_called_with_system_and_user_messages(self):
         agent, _, _, llm = _make_agent()
@@ -559,6 +596,34 @@ class TestSectionBySectionStreaming:
         assert chunks[2][1] is not None
         assert chunks[3][1] is not None
         assert llm.chat.completions.create.call_count == 3
+
+    def test_streaming_section_calls_use_model_config(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_MODEL", "stream-model")
+        monkeypatch.setenv("OPENAI_TEMPERATURE", "0.2")
+        monkeypatch.setenv("OPENAI_MAX_TOKENS", "456")
+        fhir = _make_fhir_client()
+        extractor = _make_extractor()
+        llm = MagicMock()
+
+        responses = []
+        for content in [
+            "## Current Issues\n- Hypertension",
+            "## Recent Changes\n- A1c increased",
+            "## Risks and Follow-up\n- Recheck BP",
+        ]:
+            choice = MagicMock()
+            choice.message.content = content
+            responses.append(MagicMock(choices=[choice]))
+
+        llm.chat.completions.create.side_effect = responses
+        agent = SummaryAgent(fhir_client=fhir, extractor=extractor, llm_client=llm)
+
+        list(agent.generate_summary_stream("patient-001", "ED Doctor"))
+
+        for call in llm.chat.completions.create.call_args_list:
+            assert call.kwargs["model"] == "stream-model"
+            assert call.kwargs["temperature"] == 0.2
+            assert call.kwargs["max_tokens"] == 456
 
     def test_source_sections_are_compact(self):
         fhir = _make_fhir_client()
