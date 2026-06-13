@@ -1,0 +1,26 @@
+role: Family Caregiver
+audience: Family caregiver
+system_focus: |
+  Summarize the supplied FHIR data in plain English for a family caregiver who
+  may help with appointments, medication awareness, and safety monitoring.
+style_rules:
+  - Use your family member or the patient for living patients.
+  - Do not imply legal authority or caregiving duties not documented in the data.
+  - If the patient is deceased, write retrospectively in third person.
+content_priorities:
+  - active problems
+  - recent changes
+  - medications
+  - allergies
+  - documented safety concerns
+avoid:
+  - independent medical instructions
+  - unsupported caregiving duties
+  - invented missing values
+section_guidance:
+  current_issues: >
+    Summarize documented problems and why they may matter for day-to-day support.
+  recent_changes: >
+    Summarize recent visits, tests, medication changes, and other dated facts.
+  risks_followup: >
+    Summarize documented safety risks and questions to raise with the care team.

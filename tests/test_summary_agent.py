@@ -14,7 +14,6 @@ from src.agent import (
     DEFAULT_OPENAI_MODEL,
     DEFAULT_OPENAI_TEMPERATURE,
     STREAM_THROTTLE_SECONDS,
-    SUMMARY_OUTPUT_RULES,
     SummaryAgent,
     _extract_stream_delta,
     _fetch_all_fhir_resources,
@@ -24,6 +23,7 @@ from src.agent import (
 from src.context_extractor import PatientContextExtractor
 from src.exceptions import FHIRClientError, FHIRUnavailableError
 from src.models import PatientResources, SummaryResult
+from src.tools.prompt_loader import get_role_prompt
 
 ISO_8601_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
@@ -86,7 +86,7 @@ def _make_agent(
     available=True,
     patient_resources=None,
     side_effects=None,
-    stream_contents: tuple[str, ...] = ("## Current Issues\n", "- Hypertension\n"),
+    stream_contents: tuple[str, ...] = ("## Current Issues\n", "- Hypertension [S1]\n"),
 ):
     fhir = _make_fhir_client(
         available=available,
@@ -206,7 +206,7 @@ class TestStreamingSummary:
         assert isinstance(resources, PatientResources)
         assert resources.patient == selected_patient
         assert resources.conditions == [selected_condition]
-        assert chunks[0][1][0].items == ["Selected condition"]
+        assert chunks[0][1][1].items[0].summary == "Selected condition"
         assert chunks[-1][0] == "## Current Issues\n- Selected condition"
 
     def test_local_fallback_resources_match_urn_uuid_patient_references(self):
@@ -245,15 +245,17 @@ class TestStreamingSummary:
         assert chunks[1][0] == "A"
 
     def test_single_llm_stream_call_accumulates_markdown(self):
-        agent, _, _, llm = _make_agent(stream_contents=("## Current", " Issues\n", "- BP high"))
+        agent, _, _, llm = _make_agent(
+            stream_contents=("## Current", " Issues\n", "- BP high [S1]")
+        )
 
         chunks = list(agent.generate_summary_stream("patient-001", "ED Doctor"))
 
         assert llm.chat.completions.create.call_count == 1
         call_kwargs = llm.chat.completions.create.call_args.kwargs
         assert call_kwargs["stream"] is True
-        assert SUMMARY_OUTPUT_RULES.strip() in call_kwargs["messages"][1]["content"]
-        assert chunks[-1][0] == "## Current Issues\n- BP high"
+        assert "=== Citeable FHIR Source Index ===" in call_kwargs["messages"][1]["content"]
+        assert chunks[-1][0] == "## Current Issues\n- BP high [S1]"
 
     def test_streaming_throttles_intermediate_yields_but_keeps_first_and_final(
         self,
@@ -282,6 +284,7 @@ class TestStreamingSummary:
         assert len(messages) == 2
         assert messages[0]["role"] == "system"
         assert messages[1]["role"] == "user"
+        assert messages[0]["content"] == get_role_prompt("Care Manager")
         assert "FHIR patient context:" in messages[1]["content"]
 
     def test_llm_stream_exception_yields_error(self):
@@ -371,7 +374,7 @@ class TestFetchAllFhirResources:
 
 
 class TestSourceSections:
-    def test_source_sections_are_compact(self):
+    def test_source_sections_are_structured_and_unlimited(self):
         fhir = _make_fhir_client()
         extractor = PatientContextExtractor()
         llm = _make_llm_stream("unused")
@@ -379,19 +382,22 @@ class TestSourceSections:
         resources = PatientResources(
             patient=MINIMAL_PATIENT,
             conditions=[
-                {"code": {"text": "A"}},
-                {"code": {"text": "B"}},
-                {"code": {"text": "C"}},
-                {"code": {"text": "D"}},
+                {"resourceType": "Condition", "id": "c1", "code": {"text": "A"}},
+                {"resourceType": "Condition", "id": "c2", "code": {"text": "B"}},
+                {"resourceType": "Condition", "id": "c3", "code": {"text": "C"}},
+                {"resourceType": "Condition", "id": "c4", "code": {"text": "D"}},
             ],
         )
 
         sections = agent._build_source_sections(resources)
-        condition_section = sections[0]
+        condition_section = sections[1]
 
-        assert condition_section.label == "Active Conditions (4)"
-        assert condition_section.items == ["A", "B", "C"]
-        assert condition_section.hidden_items == ["D"]
+        assert condition_section.label == "Conditions (4)"
+        assert [item.summary for item in condition_section.items] == ["A", "B", "C", "D"]
+        assert condition_section.items[0].source_id == "S2"
+        assert condition_section.items[0].resource_type == "Condition"
+        assert condition_section.items[0].evidence["code"] == "A"
+        assert condition_section.hidden_items == []
 
 
 class TestParseSectionsCompatibility:

@@ -54,8 +54,9 @@ The workflow uses these FHIR resource types:
   app still uses the full `Patient.id` internally.
 - Streams a single OpenAI summary request into the UI as markdown is produced.
 - Generates the three required summary sections in one model response.
-- Shows compact Reference Data Sources so judges can inspect which FHIR values
-  were used.
+- Shows Reference Data Sources as citeable `[Sx]` FHIR source items. Each item
+  can expand to specific evidence fields and, separately, the single raw FHIR
+  resource behind that evidence.
 - Supports multiple local patient JSON bundles in the `data/` directory.
 - Runs as a Dockerized web app that connects to a user-provided IRIS for
   Health or HealthShare FHIR endpoint.
@@ -84,7 +85,12 @@ Main components:
 - `src.fhir_loader`: posts local FHIR transaction bundles into IRIS.
 - `src.fhir_client`: reads FHIR resources from IRIS or from local fallback JSON.
 - `src.context_extractor`: converts FHIR resources into compact clinical text.
-- `src.agent`: selects the role prompt and calls the OpenAI streaming API.
+- `src.tools.source_items`: builds citeable FHIR source items and source-index
+  context from the seven supported resource types.
+- `src.tools.prompt_loader`: assembles the shared system policy and selected
+  role YAML prompt.
+- `src.agent`: builds source context, selects the role prompt, calls the OpenAI
+  streaming API, and optionally repairs invalid or missing citations.
 - `src.app`: Gradio web UI.
 
 For Open Exchange usage, the Docker Compose default starts only the web app.
@@ -107,7 +113,8 @@ Users connect it to their own IRIS for Health or HealthShare FHIR endpoint with
    - Recent Changes
    - Risks and Follow-up
 9. The UI updates accumulated markdown as chunks arrive and displays
-   expandable reference source data.
+   expandable reference source data. Summary citations like `[S3]` refer to
+   items in the Reference Data Sources panel.
 
 ## Using the App
 
@@ -125,8 +132,8 @@ To use the app:
 5. Click `Generate Summary`.
 6. Review the generated `Current Issues`, `Recent Changes`, and
    `Risks and Follow-up` sections.
-7. Expand `Reference Data Sources` to inspect the FHIR values used by the
-   summary.
+7. Expand `Reference Data Sources` to inspect source indices, evidence fields,
+   and optional raw FHIR resources used by the summary.
 
 ## Demo
 
@@ -142,7 +149,8 @@ Demo steps:
 4. Select a summary role.
 5. Click `Generate Summary`.
 6. Review `Current Issues`, `Recent Changes`, and `Risks and Follow-up`.
-7. Expand `Reference Data Sources` to inspect the FHIR values used by the agent.
+7. Expand `Reference Data Sources` to inspect the FHIR evidence used by the
+   agent.
 
 ## Prerequisites
 
@@ -199,6 +207,9 @@ OPENAI_MODEL=gpt-4o-mini
 OPENAI_TEMPERATURE=0.3
 OPENAI_MAX_TOKENS=800
 STREAM_THROTTLE_SECONDS=0.2
+CITATION_REPAIR_ENABLED=true
+CITATION_REPAIR_MAX_ATTEMPTS=1
+CITATION_STRICT_MODE=false
 ```
 
 Important environment variables:
@@ -210,6 +221,9 @@ Important environment variables:
 | `OPENAI_TEMPERATURE` | Model temperature. Default is `0.3`. |
 | `OPENAI_MAX_TOKENS` | Maximum tokens for each model response. Default is `800`. |
 | `STREAM_THROTTLE_SECONDS` | Streaming UI throttle interval in seconds. Default is `0.2`. |
+| `CITATION_REPAIR_ENABLED` | Whether the app should ask the LLM to repair invalid or missing source citations after the streamed draft. Default is `true`. |
+| `CITATION_REPAIR_MAX_ATTEMPTS` | Maximum citation repair attempts. Default is `1`. |
+| `CITATION_STRICT_MODE` | If `true`, return an error when citation validation still fails after repair. Default is `false`. |
 | `IRIS_BASE_URL` | IRIS FHIR R4 endpoint. |
 | `IRIS_USERNAME` | IRIS basic-auth username. |
 | `IRIS_PASSWORD` | IRIS basic-auth password. |
@@ -376,8 +390,7 @@ label to the full `Patient.id`.
 
 ## Model and Prompts
 
-Model settings are centralized in `src.agent` and can be overridden with
-environment variables:
+Model settings can be overridden with environment variables:
 
 ```env
 OPENAI_MODEL=gpt-4o-mini
@@ -386,16 +399,22 @@ OPENAI_MAX_TOKENS=800
 STREAM_THROTTLE_SECONDS=0.2
 ```
 
-The prompt is role-specific:
+Prompts are loaded from files:
 
-- `ED_DOCTOR_PROMPT`
-- `CARE_MANAGER_PROMPT`
-- `PATIENT_PROMPT`
-- `FAMILY_CAREGIVER_PROMPT`
+- `src/prompts/system_policy.md`
+- `src/prompts/roles/ED_Doctor.yaml`
+- `src/prompts/roles/Care_Manager.yaml`
+- `src/prompts/roles/Patient.yaml`
+- `src/prompts/roles/Family_Caregiver.yaml`
 
 The application sends the same extracted FHIR patient context to the model for
-all roles. The selected role changes the system prompt, so the output is framed
-for an ED doctor, care manager, patient, or family caregiver.
+all roles. The selected role changes the assembled system prompt, so the output
+is framed for an ED doctor, care manager, patient, or family caregiver.
+
+The prompt includes a source-index citation policy. Factual claims should cite
+valid Reference Data Sources ids such as `[S3]`; after streaming, citation
+validation can invoke one repair request to add missing citations, replace
+invalid ids, or remove unsupported claims.
 
 Summary generation uses the OpenAI streaming API. The app sends one request
 with `stream=True`, then renders accumulated markdown as chunks arrive. The

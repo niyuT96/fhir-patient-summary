@@ -6,8 +6,10 @@ Gradio UI for patient selection, role selection, and summary display.
 from __future__ import annotations
 
 import os
+import json
 from collections import Counter
 from datetime import date, datetime, timezone
+from html import escape
 from typing import Generator
 
 import gradio as gr
@@ -17,7 +19,7 @@ from openai import OpenAI
 from src.agent import SUPPORTED_ROLES, SummaryAgent
 from src.context_extractor import PatientContextExtractor
 from src.fhir_client import FHIRClient
-from src.models import SourceSection
+from src.models import SourceItem, SourceSection
 
 load_dotenv()
 
@@ -166,34 +168,48 @@ def _build_sources_html(sections: list[SourceSection], data_source: str) -> str:
     ]
 
     for section in sections:
-        if section.items == ["None"]:
+        if not section.items:
             continue
 
         lines.append(
             f'<details style="margin-bottom:6px;">'
             f'<summary style="cursor:pointer;font-weight:600;color:#374151;'
             f'padding:3px 0;">{section.label}</summary>'
-            f'<ul style="margin:4px 0 4px 18px;padding:0;color:#4b5563;">'
+            f'<div style="margin:6px 0 4px 0;color:#4b5563;">'
         )
         for item in section.items:
-            lines.append(f"<li>{item}</li>")
-        if section.hidden_items:
-            hidden_count = len(section.hidden_items)
-            lines.append(
-                f'<li style="list-style:none;margin-top:4px;">'
-                f'<details>'
-                f'<summary style="cursor:pointer;color:#2563eb;">'
-                f"Show {hidden_count} more"
-                f"</summary>"
-                f'<ul style="margin:4px 0 4px 18px;padding:0;color:#4b5563;">'
-            )
-            for hidden_item in section.hidden_items:
-                lines.append(f"<li>{hidden_item}</li>")
-            lines.append("</ul></details></li>")
-        lines.append("</ul></details>")
+            lines.append(_render_source_item(item))
+        lines.append("</div></details>")
 
     lines.append("</div>")
     return "\n".join(lines)
+
+
+def _render_source_item(item: SourceItem) -> str:
+    evidence_json = escape(json.dumps(item.evidence, indent=2, ensure_ascii=False, default=str))
+    raw_json = escape(json.dumps(item.raw_resource, indent=2, ensure_ascii=False, default=str))
+    label = escape(item.label)
+    source_id = escape(item.source_id)
+    resource = escape(f"{item.resource_type}/{item.resource_id}")
+    return (
+        '<details style="border-top:1px solid #e5e7eb;padding:6px 0;">'
+        '<summary style="cursor:pointer;display:flex;gap:8px;align-items:baseline;">'
+        f'<span style="font-weight:700;color:#2563eb;">[{source_id}]</span>'
+        f'<span>{label}</span>'
+        "</summary>"
+        '<div style="margin:6px 0 0 28px;">'
+        f'<div style="font-size:0.84em;color:#6b7280;margin-bottom:4px;">{resource}</div>'
+        '<div style="font-weight:600;color:#374151;margin:4px 0;">Evidence</div>'
+        f'<pre style="white-space:pre-wrap;background:#fff;border:1px solid #e5e7eb;'
+        f'border-radius:6px;padding:8px;margin:0 0 6px 0;">{evidence_json}</pre>'
+        '<details>'
+        '<summary style="cursor:pointer;color:#2563eb;">Show raw FHIR resource</summary>'
+        f'<pre style="white-space:pre-wrap;background:#fff;border:1px solid #e5e7eb;'
+        f'border-radius:6px;padding:8px;margin:6px 0 0 0;">{raw_json}</pre>'
+        '</details>'
+        "</div>"
+        "</details>"
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,27 @@
+role: Patient
+audience: Patient
+system_focus: |
+  Summarize the supplied FHIR data in patient-facing English. Explain current
+  issues, recent changes, medicines, allergies, and questions to ask a clinician
+  using plain language.
+style_rules:
+  - For living patients, address the patient as you.
+  - Explain medical terms briefly when they are necessary.
+  - If the patient is deceased, write retrospectively in third person.
+content_priorities:
+  - health issues documented in the record
+  - recent visits and test results
+  - medications
+  - allergies
+  - questions to ask clinicians
+avoid:
+  - new diagnoses
+  - independent medical orders
+  - invented missing values
+section_guidance:
+  current_issues: >
+    Explain the main documented health issues in plain language.
+  recent_changes: >
+    Explain recent dated changes or visits from the record.
+  risks_followup: >
+    Summarize documented risks and practical questions for the clinician.

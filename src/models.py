@@ -7,7 +7,7 @@ All modules import PatientResources and SummaryResult from here.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 
 @dataclass
@@ -24,18 +24,25 @@ class PatientResources:
 
 
 @dataclass
-class SourceSection:
-    """One labelled group of source data items shown in the UI.
+class SourceItem:
+    """One citeable FHIR evidence item shown in the UI and prompt context."""
 
-    Example:
-        label = "Recent Observations"
-        items = ["Blood Pressure: 120/80 mmHg (2026-01-15)",
-                 "Heart Rate: 72 /min (2026-01-15)"]
-    """
+    source_id: str
+    label: str
+    resource_type: str
+    resource_id: str
+    summary: str
+    evidence: dict[str, Any]
+    raw_resource: dict[str, Any]
+
+
+@dataclass
+class SourceSection:
+    """One labelled group of citeable source data items shown in the UI."""
 
     label: str          # Display heading, e.g. "Active Conditions"
-    items: list[str]    # Formatted text lines extracted from FHIR resources
-    hidden_items: list[str] = field(default_factory=list)
+    items: list[SourceItem]
+    hidden_items: list[SourceItem] = field(default_factory=list)
 
 
 @dataclass

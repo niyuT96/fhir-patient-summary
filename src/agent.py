@@ -14,6 +14,10 @@ from typing import TYPE_CHECKING
 
 from src.exceptions import FHIRClientError, FHIRUnavailableError
 from src.models import PatientResources, SourceSection, SummaryResult
+from src.tools.citation_repair import repair_summary_citations
+from src.tools.citation_validator import validate_citations
+from src.tools.prompt_loader import get_role_prompt, get_supported_roles
+from src.tools.source_items import build_source_context, build_source_sections
 
 if TYPE_CHECKING:
     from src.context_extractor import PatientContextExtractor
@@ -25,6 +29,9 @@ DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_OPENAI_TEMPERATURE = 0.3
 DEFAULT_OPENAI_MAX_TOKENS = 800
 STREAM_THROTTLE_SECONDS = 0.2
+DEFAULT_CITATION_REPAIR_ENABLED = True
+DEFAULT_CITATION_REPAIR_MAX_ATTEMPTS = 1
+DEFAULT_CITATION_STRICT_MODE = False
 
 
 @dataclass(frozen=True)
@@ -61,6 +68,17 @@ def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
     return value
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw_value = os.environ.get(name, "").strip().lower()
+    if not raw_value:
+        return default
+    if raw_value in {"1", "true", "yes", "on"}:
+        return True
+    if raw_value in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 def _get_model_config() -> ModelConfig:
     """Read OpenAI model settings from environment variables with safe fallbacks."""
     model = os.environ.get("OPENAI_MODEL", "").strip() or DEFAULT_OPENAI_MODEL
@@ -75,165 +93,7 @@ def _get_model_config() -> ModelConfig:
         ),
     )
 
-# ---------------------------------------------------------------------------
-# Role-specific system prompts
-# ---------------------------------------------------------------------------
-
-DECEASED_RECORD_RULES = """
-If Patient.deceasedDateTime, deceasedBoolean=true, death certification, or cause-of-death data is present:
-- State first that the patient is deceased and summarize retrospectively only.
-- Treat active conditions, medications, and care plans as historical unless clearly documented before death.
-- For diagnoses in a deceased patient, prefer 'FHIR-listed active diagnoses before death' or 'conditions documented before death' instead of unqualified 'active diagnoses'.
-- Do not imply that conditions, medications, or care plans were active at the exact time of death unless supplied dates explicitly support that.
-- Do not say 'medications at the time of death' unless a medication period overlaps the death date.
-- Do NOT recommend active treatment, monitoring, medication adherence work, chronic disease follow-up, self-management, or routine care coordination.
-- Do NOT recommend family support, estate management, bereavement support, caregiver actions, or support for surviving family members unless explicitly documented in the supplied FHIR data.
-- Mention documentation gaps only when the supplied context shows a specific missing or unclear field, such as missing cause of death, missing allergy data, unclear medication dates, or unclear terminal encounter details. Do not use vague phrases like 'documentation gaps may exist'.
-- For deceased patients, do not frame missing recent vitals/labs as an active concern about current clinical status. If relevant, phrase it only as a retrospective documentation limitation, e.g. "No vitals/labs are documented in the supplied data between [date] and death."
-- For Risks and Follow-up, limit content to retrospective chart review: death date/cause clarity, terminal clinical trajectory, medication/allergy safety facts, and specific documentation gaps.
-- Avoid repeating the same death date/cause in every section. Place deceased status in Current Issues, place death/death-certification events in Recent Changes only as dated timeline events, and use Risks and Follow-up only for specific retrospective safety facts or documentation gaps.
-"""
-
-LIVING_PATIENT_RULES = """
-If no Patient.deceasedDateTime, no deceasedBoolean=true, no death certification, and no cause-of-death data is present:
-- Treat the patient as living or death status not documented.
-- Do NOT mention missing death certification, missing cause of death, end-of-life documentation gaps, or death-related follow-up.
-- Do NOT infer end-of-life care needs from the absence of death-related fields.
-"""
-
-VOICE_AND_AUDIENCE_RULES = """
-Voice and audience rules:
-- ED Doctor: write in concise third-person clinical chart style. Use "patient" or the patient's name. Do not address the reader as "you".
-- Care Manager: write in third-person care-coordination style. Use "patient" or the patient's name. Do not address the reader as "you".
-- Patient: for living patients, write directly to the patient using "you" and plain language. If the patient is deceased, do not address the patient as "you"; write retrospectively in third person.
-- Family Caregiver: for living patients, write to the caregiver using "your family member" or "the patient". Do not imply legal authority or caregiving duties not documented in the data. If the patient is deceased, write retrospectively in third person.
-- Never mix voices within the same summary.
-"""
-
-ED_DOCTOR_PROMPT = ( """
-Summarize the supplied FHIR data for an Emergency Department physician in English.
-
-Use only supplied data. Prioritize latest encounter, recent vitals/labs, active/recent diagnoses,
-meds, allergies, and acute safety risks. Ignore billing/insurance/care management goals/care plans unless clinically actionable.
-Recent data > old history. Include dates/key values. Do not invent missing data.
-
-""" + DECEASED_RECORD_RULES + LIVING_PATIENT_RULES + VOICE_AND_AUDIENCE_RULES + """
-
-Recent Changes rules:
-- List clinically relevant events in chronological order, latest to earliest.
-- The first bullet must be the latest documented clinical event.
-
-Be concise: 3-5 bullets per section. Medical shorthand allowed.
-
-Output exactly:
-
-## Current Issues
-- ...
-
-## Recent Changes
-- ...
-
-## Risks and Follow-up
-- ED safety risks, missing critical data, drug/allergy concerns, or retrospective disposition notes only.
-"""
-)
-
-CARE_MANAGER_PROMPT = (
-    "You are a clinical AI assistant generating a patient summary for a Care Manager focused on "
-    "chronic\n"
-    "disease management and care coordination. Focus on: chronic conditions, medication adherence,\n"
-    "pending care plan goals, upcoming follow-up needs, and social/functional risks.\n"
-    "For living patients, include actionable care coordination items.\n"
-    "For deceased patients, switch to retrospective chart review only: death date/cause, final "
-    "clinical trajectory, pre-death diagnoses, medications, allergies, and documentation gaps. "
-    "Do not create new care tasks.\n"
-    "Do not list historical care plans as follow-up needs. For deceased patients, mention care plans "
-    "only as historical context if they directly clarify the terminal course or chart review.\n"
-    "Use plain clinical language. Include actionable care coordination items only for living patients.\n"
-    "Use only the supplied FHIR context. Do not invent missing values. Keep each section to "
-    "3-5 concise bullet points.\n"
-    + DECEASED_RECORD_RULES + LIVING_PATIENT_RULES + VOICE_AND_AUDIENCE_RULES +
-    "\n"
-    "Structure your response EXACTLY as:\n"
-    "## Current Issues\n"
-    "<bullet points>\n"
-    "\n"
-    "## Recent Changes\n"
-    "<bullet points>\n"
-    "\n"
-    "## Risks and Follow-up\n"
-    "<bullet points>"
-)
-
-PATIENT_PROMPT = (
-    "You are a clinical AI assistant generating a patient-facing summary in English.\n"
-    "Use the same supplied FHIR context, but explain it in plain language for the patient.\n"
-    "Avoid medical jargon when possible; when jargon is necessary, briefly explain it.\n"
-    "Focus on what the patient should understand about current health issues, recent changes, "
-    "medicines, allergies, and what questions to ask their clinician.\n"
-    "Use only supplied data. Do not diagnose new conditions, invent missing values, or give "
-    "emergency instructions beyond advising urgent care for clearly documented serious risk.\n"
-    + DECEASED_RECORD_RULES + LIVING_PATIENT_RULES + VOICE_AND_AUDIENCE_RULES +
-    "Keep each section to 3-5 concise bullet points.\n"
-    "\n"
-    "Structure your response EXACTLY as:\n"
-    "## Current Issues\n"
-    "<bullet points>\n"
-    "\n"
-    "## Recent Changes\n"
-    "<bullet points>\n"
-    "\n"
-    "## Risks and Follow-up\n"
-    "<bullet points>"
-)
-
-FAMILY_CAREGIVER_PROMPT = (
-    "You are a clinical AI assistant generating a family caregiver summary in English.\n"
-    "Use the same supplied FHIR context, but explain it for a non-clinician who may help with "
-    "appointments, medication awareness, and safety monitoring.\n"
-    "Focus on practical caregiving implications: active problems, recent changes, medication "
-    "or allergy risks, warning signs documented in the record, and questions to raise with the "
-    "care team.\n"
-    "Use only supplied data. Do not invent missing values. Avoid giving independent medical "
-    "orders or replacing clinician advice.\n"
-    + DECEASED_RECORD_RULES + LIVING_PATIENT_RULES + VOICE_AND_AUDIENCE_RULES +
-    "Keep each section to 3-5 concise bullet points.\n"
-    "\n"
-    "Structure your response EXACTLY as:\n"
-    "## Current Issues\n"
-    "<bullet points>\n"
-    "\n"
-    "## Recent Changes\n"
-    "<bullet points>\n"
-    "\n"
-    "## Risks and Follow-up\n"
-    "<bullet points>"
-)
-
-_ROLE_PROMPTS: dict[str, str] = {
-    "ED Doctor": ED_DOCTOR_PROMPT,
-    "Care Manager": CARE_MANAGER_PROMPT,
-    "Patient": PATIENT_PROMPT,
-    "Family Caregiver": FAMILY_CAREGIVER_PROMPT,
-}
-
-SUPPORTED_ROLES = tuple(_ROLE_PROMPTS.keys())
-
-SUMMARY_OUTPUT_RULES = """
-Return one complete summary with exactly these sections:
-
-## Current Issues
-- bullets
-
-## Recent Changes
-- bullets, chronological order, latest to earliest
-
-## Risks and Follow-up
-- bullets
-
-Do not add any other headings.
-Use only the supplied FHIR context.
-"""
+SUPPORTED_ROLES = get_supported_roles()
 
 # ---------------------------------------------------------------------------
 # Header - key mapping (case-sensitive, must match exactly on their own line)
@@ -490,71 +350,8 @@ class SummaryAgent:
     # ---------------------------------------------------------------------- #
 
     def _build_source_sections(self, resources: PatientResources) -> list[SourceSection]:
-        """Build a compact source summary for the UI reference panel."""
-        sections: list[SourceSection] = []
-
-        def _source_section(label: str, items: list[str], limit: int = 3) -> SourceSection:
-            if not items:
-                return SourceSection(label=label, items=["None"])
-            return SourceSection(
-                label=label,
-                items=items[:limit],
-                hidden_items=items[limit:],
-            )
-
-        # --- Active Conditions ---
-        cond_items = [
-            self._extractor._format_condition(c).lstrip("- ")
-            for c in resources.conditions
-        ]
-        sections.append(_source_section(f"Active Conditions ({len(cond_items)})", cond_items))
-
-        # --- Medication Requests ---
-        med_items = [
-            self._extractor._format_medication(m).lstrip("- ")
-            for m in resources.medications
-        ]
-        sections.append(_source_section(f"Medication Requests ({len(med_items)})", med_items))
-
-        # --- Allergies ---
-        allergy_items = [
-            self._extractor._format_allergy(a).lstrip("- ")
-            for a in resources.allergies
-        ]
-        sections.append(_source_section(f"Allergies ({len(allergy_items)})", allergy_items))
-
-        # --- Recent Observations (newest first, up to 10) ---
-        sorted_obs = sorted(
-            resources.observations,
-            key=lambda o: o.get("effectiveDateTime", ""),
-            reverse=True,
-        )[:10]
-        obs_items = [
-            self._extractor._format_observation(o).lstrip("- ")
-            for o in sorted_obs
-        ]
-        obs_items = [i for i in obs_items if i]  # drop blanks
-        sections.append(_source_section(f"Recent Observations ({len(obs_items)})", obs_items))
-
-        # --- Recent Encounters (newest first, up to 3) ---
-        sorted_enc = sorted(
-            resources.encounters,
-            key=lambda e: e.get("period", {}).get("start", ""),
-            reverse=True,
-        )[:3]
-        enc_items = [
-            self._extractor._format_encounter(e).lstrip("- ")
-            for e in sorted_enc
-        ]
-        enc_items = [i for i in enc_items if i]
-        sections.append(_source_section(f"Recent Encounters ({len(enc_items)})", enc_items))
-
-        # --- Care Plan ---
-        activity_lines = self._extractor._extract_activity_lines(resources.care_plans)
-        cp_items = [line.lstrip("- Activity: ") for line in activity_lines]
-        sections.append(_source_section(f"Care Plan ({len(cp_items)} activities)", cp_items))
-
-        return sections
+        """Build structured citeable source data for the UI reference panel."""
+        return build_source_sections(resources)
 
     # ---------------------------------------------------------------------- #
     # Streaming summary generator                                             #
@@ -568,7 +365,7 @@ class SummaryAgent:
         - Later yields carry accumulated markdown from a single OpenAI stream.
         Never raises; errors are surfaced as a final plain-text yield with source_sections=[].
         """
-        if role not in _ROLE_PROMPTS:
+        if role not in SUPPORTED_ROLES:
             yield f"**Error:** Unsupported role: {role}", []
             return
 
@@ -594,6 +391,8 @@ class SummaryAgent:
 
         source_sections = self._build_source_sections(resources)
         context_text = self._extractor.extract(resources)
+        source_context = build_source_context(source_sections)
+        system_prompt = get_role_prompt(role)
 
         # Let the UI show reference data before waiting for any LLM response.
         yield "", source_sections
@@ -603,13 +402,13 @@ class SummaryAgent:
             stream = self._llm.chat.completions.create(
                 model=config.model,
                 messages=[
-                    {"role": "system", "content": _ROLE_PROMPTS[role]},
+                    {"role": "system", "content": system_prompt},
                     {
                         "role": "user",
                         "content": (
-                            f"{SUMMARY_OUTPUT_RULES}\n\n"
                             "FHIR patient context:\n"
-                            f"{context_text}"
+                            f"{context_text}\n\n"
+                            f"{source_context}"
                         ),
                     },
                 ],
@@ -641,11 +440,64 @@ class SummaryAgent:
                     yield accumulated, source_sections
 
             if accumulated:
+                accumulated = self._repair_citations_if_needed(
+                    accumulated,
+                    source_sections,
+                    config,
+                )
                 yield accumulated, source_sections
 
         except Exception as llm_exc:  # noqa: BLE001
             logger.exception("LLM stream generation error: %s", llm_exc)
             yield f"**Error:** {llm_exc}", []
+
+    def _repair_citations_if_needed(
+        self,
+        summary: str,
+        source_sections: list[SourceSection],
+        config: ModelConfig,
+    ) -> str:
+        """Validate final summary citations and optionally repair them once."""
+        validation = validate_citations(summary, source_sections)
+        if not validation.has_errors:
+            return summary
+
+        max_attempts = _env_int(
+            "CITATION_REPAIR_MAX_ATTEMPTS",
+            DEFAULT_CITATION_REPAIR_MAX_ATTEMPTS,
+            minimum=0,
+        )
+        repair_enabled = _env_bool("CITATION_REPAIR_ENABLED", DEFAULT_CITATION_REPAIR_ENABLED)
+        strict_mode = _env_bool("CITATION_STRICT_MODE", DEFAULT_CITATION_STRICT_MODE)
+
+        repaired = summary
+        if repair_enabled:
+            for _ in range(max_attempts):
+                try:
+                    repaired = repair_summary_citations(
+                        llm_client=self._llm,
+                        model=config.model,
+                        temperature=config.temperature,
+                        summary=repaired,
+                        source_sections=source_sections,
+                        validation=validation,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Citation repair failed: %s", exc)
+                    break
+                validation = validate_citations(repaired, source_sections)
+                if not validation.has_errors:
+                    return repaired
+
+        if strict_mode and validation.has_errors:
+            details = []
+            if validation.invalid_source_ids:
+                details.append(f"invalid source ids: {sorted(validation.invalid_source_ids)}")
+            if validation.uncited_lines:
+                details.append(f"uncited lines: {len(validation.uncited_lines)}")
+            return "**Error:** Citation validation failed (" + "; ".join(details) + ")"
+
+        return repaired
 
 
 def _extract_stream_delta(chunk) -> str:

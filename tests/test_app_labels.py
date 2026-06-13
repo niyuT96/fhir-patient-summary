@@ -2,7 +2,7 @@ import importlib
 from datetime import date
 from unittest.mock import MagicMock, patch
 
-from src.models import SourceSection
+from src.models import SourceItem, SourceSection
 
 
 def _load_app_module(monkeypatch):
@@ -84,22 +84,35 @@ def test_patient_choices_append_short_id_only_for_duplicate_base_labels(monkeypa
     assert id_map[choices[1]] == "beta-456789"
 
 
-def test_sources_html_keeps_hidden_items_expandable(monkeypatch):
+def _source_item(source_id="S1", summary="Hypertension"):
+    return SourceItem(
+        source_id=source_id,
+        label=f"{source_id} | Condition/c1 | {summary}",
+        resource_type="Condition",
+        resource_id="c1",
+        summary=summary,
+        evidence={"resourceType": "Condition", "id": "c1", "code": summary},
+        raw_resource={"resourceType": "Condition", "id": "c1", "code": {"text": summary}},
+    )
+
+
+def test_sources_html_expands_source_item_evidence(monkeypatch):
     app = _load_app_module(monkeypatch)
     html = app._build_sources_html(
         [
             SourceSection(
-                label="Active Conditions (4)",
-                items=["A", "B", "C"],
-                hidden_items=["D"],
+                label="Conditions (1)",
+                items=[_source_item()],
             )
         ],
         "local_fallback",
     )
 
-    assert "Show 1 more" in html
-    assert "<li>D</li>" in html
-    assert "...and" not in html
+    assert "[S1]" in html
+    assert "Evidence" in html
+    assert "Hypertension" in html
+    assert "Show raw FHIR resource" in html
+    assert "Show 1 more" not in html
 
 
 def test_on_generate_uses_generator_end_as_completion_signal(monkeypatch):
@@ -111,14 +124,14 @@ def test_on_generate_uses_generator_end_as_completion_signal(monkeypatch):
             assert role == "ED Doctor"
             yield "", [
                 SourceSection(
-                    label="Active Conditions (1)",
-                    items=["Hypertension"],
+                    label="Conditions (1)",
+                    items=[_source_item()],
                 )
             ]
             yield "## Current Issues\n- Hypertension", [
                 SourceSection(
-                    label="Active Conditions (1)",
-                    items=["Hypertension"],
+                    label="Conditions (1)",
+                    items=[_source_item()],
                 )
             ]
 
@@ -131,7 +144,7 @@ def test_on_generate_uses_generator_end_as_completion_signal(monkeypatch):
     assert outputs[0][1] == "Preparing FHIR reference data..."
     assert outputs[0][4]["interactive"] is False
     assert outputs[1][1] == "Generating summary..."
-    assert "Active Conditions" in outputs[1][3]
+    assert "Conditions" in outputs[1][3]
     assert outputs[2][0] == "## Current Issues\n- Hypertension"
     assert outputs[2][1] == "Generating summary..."
     assert outputs[2][4]["interactive"] is False

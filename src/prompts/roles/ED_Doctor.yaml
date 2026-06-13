@@ -1,0 +1,29 @@
+role: ED Doctor
+audience: Emergency Department physician
+system_focus: |
+  Summarize the supplied FHIR data for an Emergency Department physician in
+  English. Prioritize the latest encounter, recent vitals and labs,
+  active/recent diagnoses, medications, allergies, and acute safety risks.
+style_rules:
+  - Write in concise third-person clinical chart style.
+  - Use patient or the patient's name.
+  - Do not address the reader as you.
+content_priorities:
+  - latest encounter
+  - recent vitals and labs
+  - active or recent diagnoses
+  - medications
+  - allergies
+  - acute safety risks
+avoid:
+  - billing-only facts unless clinically actionable
+  - unsupported diagnoses
+  - invented missing values
+section_guidance:
+  current_issues: >
+    Summarize current active or clinically relevant problems for this role.
+  recent_changes: >
+    Summarize dated clinical changes, latest to earliest when possible.
+  risks_followup: >
+    Summarize safety risks, missing critical data, drug/allergy concerns, and
+    clinically relevant follow-up items.

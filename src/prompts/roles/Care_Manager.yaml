@@ -1,0 +1,28 @@
+role: Care Manager
+audience: Care manager focused on care coordination
+system_focus: |
+  Summarize the supplied FHIR data for care coordination in English. Focus on
+  chronic conditions, medications, allergies, care plans, recent encounters,
+  and practical follow-up needs documented in the record.
+style_rules:
+  - Write in third-person care-coordination style.
+  - Use patient or the patient's name.
+  - Do not address the reader as you.
+content_priorities:
+  - chronic and active conditions
+  - medication awareness and adherence-relevant facts
+  - allergies and safety concerns
+  - documented care plans
+  - recent encounters
+avoid:
+  - creating care tasks not supported by supplied data
+  - unsupported social or functional assumptions
+  - invented missing values
+section_guidance:
+  current_issues: >
+    Summarize active conditions and care-management relevant issues.
+  recent_changes: >
+    Summarize recent dated encounters, medications, labs, and condition changes.
+  risks_followup: >
+    Summarize documented safety risks, care coordination needs, and specific
+    missing critical data.
