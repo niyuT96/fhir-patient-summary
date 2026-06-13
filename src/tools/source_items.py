@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from src.context_extractor import _date_only, _text
@@ -11,6 +12,16 @@ _SKIPPED_EVIDENCE_KEYS = {"extension"}
 _SOURCE_CONTEXT_MAX_CHARS = 24000
 _SOURCE_CONTEXT_MAX_VALUE_CHARS = 500
 _TRUNCATION_NOTICE = "[Context truncated due to source context budget.]"
+
+
+@dataclass(frozen=True)
+class SourceContextResult:
+    """Source context text plus the exact SourceItems supplied in that text."""
+
+    text: str
+    sections: list[SourceSection]
+    supplied_source_ids: set[str]
+    truncated: bool
 
 
 def build_source_sections(resources: PatientResources) -> list[SourceSection]:
@@ -61,6 +72,15 @@ def build_source_sections(resources: PatientResources) -> list[SourceSection]:
 
 def build_source_context(sections: list[SourceSection]) -> str:
     """Return source-indexed factual context for the LLM."""
+    return build_source_context_result(sections).text
+
+
+def build_source_context_result(
+    sections: list[SourceSection],
+    *,
+    max_chars: int = _SOURCE_CONTEXT_MAX_CHARS,
+) -> SourceContextResult:
+    """Return LLM context and the exact SourceItems included in that context."""
     lines = [
         "=== Source-Indexed FHIR Context ===",
         "Use only the source-indexed FHIR facts below.",
@@ -69,6 +89,8 @@ def build_source_context(sections: list[SourceSection]) -> str:
         "",
     ]
     current_chars = sum(len(line) + 1 for line in lines)
+    supplied_sections: list[SourceSection] = []
+    supplied_ids: set[str] = set()
     truncated = False
 
     for section in sections:
@@ -76,11 +98,8 @@ def build_source_context(sections: list[SourceSection]) -> str:
             continue
         section_lines = [f"{section.label}:"]
         section_chars = _lines_char_count(section_lines)
-        if current_chars + section_chars > _SOURCE_CONTEXT_MAX_CHARS:
-            truncated = True
-            break
-        lines.extend(section_lines)
-        current_chars += section_chars
+        section_added = False
+        supplied_items: list[SourceItem] = []
 
         for item in section.items:
             item_lines = [
@@ -91,30 +110,44 @@ def build_source_context(sections: list[SourceSection]) -> str:
                 for key, value in item.evidence.items()
             )
             item_chars = _lines_char_count(item_lines)
-            if current_chars + item_chars > _SOURCE_CONTEXT_MAX_CHARS:
+            needed_chars = item_chars
+            if not section_added:
+                needed_chars += section_chars
+            if current_chars + needed_chars > max_chars:
                 truncated = True
                 break
+            if not section_added:
+                lines.extend(section_lines)
+                current_chars += section_chars
+                section_added = True
             lines.extend(item_lines)
             current_chars += item_chars
+            supplied_items.append(item)
+            supplied_ids.add(item.source_id)
+
+        if section_added:
+            supplied_sections.append(SourceSection(label=section.label, items=supplied_items))
 
         if truncated:
             break
 
-        blank_chars = 1
-        if current_chars + blank_chars > _SOURCE_CONTEXT_MAX_CHARS:
-            truncated = True
-            break
-        lines.append("")
-        current_chars += blank_chars
+        if section_added:
+            blank_chars = 1
+            if current_chars + blank_chars <= max_chars:
+                lines.append("")
+                current_chars += blank_chars
 
     if truncated:
         notice_chars = len(_TRUNCATION_NOTICE) + 1
-        while lines and current_chars + notice_chars > _SOURCE_CONTEXT_MAX_CHARS:
-            removed = lines.pop()
-            current_chars -= len(removed) + 1
-        lines.append(_TRUNCATION_NOTICE)
+        if current_chars + notice_chars <= max_chars:
+            lines.append(_TRUNCATION_NOTICE)
 
-    return "\n".join(lines).strip()
+    return SourceContextResult(
+        text="\n".join(lines).strip(),
+        sections=supplied_sections,
+        supplied_source_ids=supplied_ids,
+        truncated=truncated,
+    )
 
 
 def flatten_source_items(sections: list[SourceSection]) -> list[SourceItem]:

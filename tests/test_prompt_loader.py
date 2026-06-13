@@ -63,7 +63,7 @@ class TestRoleValidation:
 
         result = list(agent.generate_summary_stream("patient-001", bad_role))
 
-        assert result == [(f"**Error:** Unsupported role: {bad_role}", [])]
+        assert result == [(f"**Error:** Unsupported role: {bad_role}", [], "")]
         llm.chat.completions.create.assert_not_called()
         fhir.is_available.assert_not_called()
 

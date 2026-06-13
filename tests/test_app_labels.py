@@ -115,6 +115,22 @@ def test_sources_html_expands_source_item_evidence(monkeypatch):
     assert "Show 1 more" not in html
 
 
+def test_sources_html_displays_source_warning(monkeypatch):
+    app = _load_app_module(monkeypatch)
+    html = app._build_sources_html(
+        [
+            SourceSection(
+                label="Conditions (1)",
+                items=[_source_item()],
+            )
+        ],
+        "local_fallback",
+        "Source context was truncated.",
+    )
+
+    assert "Source context was truncated." in html
+
+
 def test_on_generate_uses_generator_end_as_completion_signal(monkeypatch):
     app = _load_app_module(monkeypatch)
 
@@ -152,6 +168,34 @@ def test_on_generate_uses_generator_end_as_completion_signal(monkeypatch):
     assert outputs[-1][1] == ""
     assert "Generated:" in outputs[-1][2]
     assert outputs[-1][4]["interactive"] is True
+
+
+def test_on_generate_displays_truncated_source_warning(monkeypatch):
+    app = _load_app_module(monkeypatch)
+
+    class FakeAgent:
+        def generate_summary_stream(self, patient_id, role):
+            yield "", [
+                SourceSection(
+                    label="Conditions (1)",
+                    items=[_source_item()],
+                )
+            ], "Source context was truncated."
+            yield "## Current Issues\n- Hypertension", [
+                SourceSection(
+                    label="Conditions (1)",
+                    items=[_source_item()],
+                )
+            ], "Source context was truncated."
+
+    monkeypatch.setattr(app, "_agent", FakeAgent())
+    monkeypatch.setattr(app, "_patient_id_map", {"Jane Doe": "patient-001"})
+    monkeypatch.setattr(app, "_data_source_label", "local_fallback")
+
+    outputs = list(app.on_generate("Jane Doe", "ED Doctor"))
+
+    assert "Source context was truncated." in outputs[1][3]
+    assert "Source context was truncated." in outputs[-1][3]
 
 
 def test_on_generate_recovers_button_if_agent_yields_nothing(monkeypatch):

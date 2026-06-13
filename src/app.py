@@ -146,7 +146,11 @@ def _build_patient_choices_and_id_map(patients: list[dict]) -> tuple[list[str], 
     return labels, id_map
 
 
-def _build_sources_html(sections: list[SourceSection], data_source: str) -> str:
+def _build_sources_html(
+    sections: list[SourceSection],
+    data_source: str,
+    source_warning: str = "",
+) -> str:
     """Render reference FHIR values as a styled HTML block for the UI."""
     if not sections:
         return ""
@@ -163,6 +167,15 @@ def _build_sources_html(sections: list[SourceSection], data_source: str) -> str:
         f"Data Source: {badge_label}</span>"
         f"</div>",
     ]
+
+    if source_warning:
+        lines.append(
+            '<div style="background:#fff7ed;border:1px solid #fb923c;'
+            'border-radius:6px;padding:8px 10px;margin-bottom:10px;'
+            'color:#9a3412;font-size:0.9em;">'
+            f"{escape(source_warning)}"
+            "</div>"
+        )
 
     for section in sections:
         if not section.items:
@@ -254,18 +267,27 @@ def on_generate(
     patient_id = _patient_id_map.get(patient_label, patient_label)
     data_source = _data_source_label
     accumulated_sources: list[SourceSection] = []
+    accumulated_source_warning = ""
     final_text = ""
     final_sources_html = ""
 
-    for partial_text, source_sections in _agent.generate_summary_stream(patient_id, role):
+    for stream_chunk in _agent.generate_summary_stream(patient_id, role):
+        if len(stream_chunk) == 3:
+            partial_text, source_sections, source_warning = stream_chunk
+        else:
+            partial_text, source_sections = stream_chunk
+            source_warning = ""
+
         is_error = partial_text.startswith("**Error:**")
         final_text = partial_text
 
         if source_sections is not None:
             accumulated_sources = source_sections or []
+        if source_warning:
+            accumulated_source_warning = source_warning
 
         final_sources_html = (
-            _build_sources_html(accumulated_sources, data_source)
+            _build_sources_html(accumulated_sources, data_source, accumulated_source_warning)
             if accumulated_sources
             else ""
         )

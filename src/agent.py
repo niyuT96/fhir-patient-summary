@@ -16,7 +16,7 @@ from src.models import PatientResources, SourceSection, SummaryResult
 from src.tools.citation_repair import repair_summary_citations
 from src.tools.citation_validator import validate_citations
 from src.tools.prompt_loader import get_role_prompt, get_supported_roles
-from src.tools.source_items import build_source_context, build_source_sections
+from src.tools.source_items import build_source_context_result, build_source_sections
 
 if TYPE_CHECKING:
     from src.fhir_client import FHIRClient
@@ -30,6 +30,10 @@ STREAM_THROTTLE_SECONDS = 0.2
 DEFAULT_CITATION_REPAIR_ENABLED = True
 DEFAULT_CITATION_REPAIR_MAX_ATTEMPTS = 1
 DEFAULT_CITATION_STRICT_MODE = False
+SOURCE_CONTEXT_TRUNCATED_WARNING = (
+    "Source context was truncated. Reference Data Sources shows only source "
+    "items supplied to the model."
+)
 
 
 @dataclass(frozen=True)
@@ -340,13 +344,17 @@ class SummaryAgent:
     def generate_summary_stream(self, patient_id: str, role: str):
         """Stream a role-specific clinical summary.
 
-        Yields tuples of (partial_markdown: str, source_sections: list[SourceSection] | None).
+        Yields tuples of (
+            partial_markdown: str,
+            source_sections: list[SourceSection] | None,
+            source_warning: str,
+        ).
         - First yield carries source_sections immediately after FHIR data is ready.
         - Later yields carry accumulated markdown from a single OpenAI stream.
         Never raises; errors are surfaced as a final plain-text yield with source_sections=[].
         """
         if role not in SUPPORTED_ROLES:
-            yield f"**Error:** Unsupported role: {role}", []
+            yield f"**Error:** Unsupported role: {role}", [], ""
             return
 
         # --- Data fetch (same logic as generate_summary) ---
@@ -354,25 +362,32 @@ class SummaryAgent:
             if self._fhir.is_available():
                 fetch_result = _fetch_all_fhir_resources(self._fhir, patient_id)
                 if isinstance(fetch_result, SummaryResult):
-                    yield f"**Error:** {fetch_result.error}", []
+                    yield f"**Error:** {fetch_result.error}", [], ""
                     return
                 resources: PatientResources = fetch_result
             else:
                 resources = self._load_fallback_resources(patient_id)
                 if isinstance(resources, SummaryResult):
-                    yield f"**Error:** {resources.error}", []
+                    yield f"**Error:** {resources.error}", [], ""
                     return
         except Exception as exc:  # noqa: BLE001
             logger.exception("Data fetch error in generate_summary_stream: %s", exc)
-            yield f"**Error:** {exc}", []
+            yield f"**Error:** {exc}", [], ""
             return
 
-        source_sections = self._build_source_sections(resources)
-        source_context = build_source_context(source_sections)
+        all_source_sections = self._build_source_sections(resources)
+        source_context_result = build_source_context_result(all_source_sections)
+        source_sections = source_context_result.sections
+        source_context = source_context_result.text
+        source_warning = (
+            SOURCE_CONTEXT_TRUNCATED_WARNING
+            if source_context_result.truncated
+            else ""
+        )
         system_prompt = get_role_prompt(role)
 
         # Let the UI show reference data before waiting for any LLM response.
-        yield "", source_sections
+        yield "", source_sections, source_warning
 
         try:
             config = _get_model_config()
@@ -408,12 +423,12 @@ class SummaryAgent:
                 if not first_chunk_seen:
                     first_chunk_seen = True
                     last_yield_at = now
-                    yield accumulated, source_sections
+                    yield accumulated, source_sections, source_warning
                     continue
 
                 if now - last_yield_at >= config.stream_throttle_seconds:
                     last_yield_at = now
-                    yield accumulated, source_sections
+                    yield accumulated, source_sections, source_warning
 
             if accumulated:
                 accumulated = self._repair_citations_if_needed(
@@ -421,11 +436,11 @@ class SummaryAgent:
                     source_sections,
                     config,
                 )
-                yield accumulated, source_sections
+                yield accumulated, source_sections, source_warning
 
         except Exception as llm_exc:  # noqa: BLE001
             logger.exception("LLM stream generation error: %s", llm_exc)
-            yield f"**Error:** {llm_exc}", []
+            yield f"**Error:** {llm_exc}", [], ""
 
     def _repair_citations_if_needed(
         self,

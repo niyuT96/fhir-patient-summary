@@ -13,6 +13,7 @@ from src.agent import (
     DEFAULT_OPENAI_MAX_TOKENS,
     DEFAULT_OPENAI_MODEL,
     DEFAULT_OPENAI_TEMPERATURE,
+    SOURCE_CONTEXT_TRUNCATED_WARNING,
     STREAM_THROTTLE_SECONDS,
     SummaryAgent,
     _extract_stream_delta,
@@ -21,9 +22,10 @@ from src.agent import (
     parse_sections,
 )
 from src.exceptions import FHIRClientError, FHIRUnavailableError
-from src.models import PatientResources, SummaryResult
+from src.models import PatientResources, SourceItem, SourceSection, SummaryResult
+from src.tools.citation_validator import validate_citations
 from src.tools.prompt_loader import get_role_prompt
-from src.tools.source_items import build_source_context
+from src.tools.source_items import SourceContextResult, build_source_context, build_source_context_result
 
 ISO_8601_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
@@ -73,6 +75,23 @@ def _make_llm_stream(*contents: str) -> MagicMock:
     llm = MagicMock()
     llm.chat.completions.create.return_value = [_stream_chunk(content) for content in contents]
     return llm
+
+
+def _source_item(
+    source_id: str,
+    resource_type: str,
+    resource_id: str,
+    summary: str,
+) -> SourceItem:
+    return SourceItem(
+        source_id=source_id,
+        label=f"{source_id} | {resource_type}/{resource_id} | {summary}",
+        resource_type=resource_type,
+        resource_id=resource_id,
+        summary=summary,
+        evidence={"resourceType": resource_type, "id": resource_id, "summary": summary},
+        raw_resource={"resourceType": resource_type, "id": resource_id},
+    )
 
 
 def _make_agent(
@@ -141,7 +160,7 @@ class TestStreamingSummary:
 
         chunks = list(agent.generate_summary_stream("patient-001", "Radiologist"))
 
-        assert chunks == [("**Error:** Unsupported role: Radiologist", [])]
+        assert chunks == [("**Error:** Unsupported role: Radiologist", [], "")]
         fhir.is_available.assert_not_called()
         llm.chat.completions.create.assert_not_called()
 
@@ -281,7 +300,7 @@ class TestStreamingSummary:
         chunks = list(agent.generate_summary_stream("patient-001", "ED Doctor"))
 
         assert chunks[0][0] == ""
-        assert chunks[-1] == ("**Error:** Rate limit exceeded", [])
+        assert chunks[-1] == ("**Error:** Rate limit exceeded", [], "")
 
     def test_no_generate_summary_non_streaming_api(self):
         agent, _, _ = _make_agent()
@@ -435,6 +454,140 @@ class TestSourceSections:
         assert "[S1] Patient/patient-001: Jane Doe; DOB: 1970-01-01; gender: female" in context
         assert "[S2] Condition/c1: Hypertension" in context
         assert "  code.text: Hypertension" in context
+
+    def test_source_context_result_tracks_supplied_items_without_truncation(self):
+        sections = [
+            SourceSection(
+                label="Conditions (2)",
+                items=[
+                    _source_item("S1", "Condition", "c1", "Hypertension"),
+                    _source_item("S2", "Condition", "c2", "Diabetes"),
+                ],
+            )
+        ]
+
+        result = build_source_context_result(sections, max_chars=2000)
+
+        assert result.truncated is False
+        assert result.supplied_source_ids == {"S1", "S2"}
+        assert [item.source_id for item in result.sections[0].items] == ["S1", "S2"]
+        assert "[S1]" in result.text
+        assert "[S2]" in result.text
+
+    def test_source_context_result_excludes_items_not_written_to_context(self):
+        sections = [
+            SourceSection(
+                label="Conditions (2)",
+                items=[
+                    _source_item("S1", "Condition", "c1", "Hypertension"),
+                    _source_item("S2", "Condition", "c2", "Diabetes " + ("x" * 500)),
+                ],
+            )
+        ]
+
+        result = build_source_context_result(sections, max_chars=500)
+
+        assert result.truncated is True
+        assert result.supplied_source_ids == {"S1"}
+        assert [item.source_id for item in result.sections[0].items] == ["S1"]
+        assert "[S1]" in result.text
+        assert "[S2]" not in result.text
+
+    def test_source_context_result_does_not_mark_truncated_for_missing_blank_line_only(self):
+        sections = [
+            SourceSection(
+                label="Conditions (1)",
+                items=[_source_item("S1", "Condition", "c1", "Hypertension")],
+            )
+        ]
+        full_result = build_source_context_result(sections, max_chars=2000)
+
+        result = build_source_context_result(sections, max_chars=len(full_result.text) + 1)
+
+        assert result.truncated is False
+        assert result.supplied_source_ids == {"S1"}
+        assert [item.source_id for item in result.sections[0].items] == ["S1"]
+
+    def test_validator_rejects_source_id_not_in_supplied_sections(self):
+        supplied_sections = [
+            SourceSection(
+                label="Conditions (1)",
+                items=[_source_item("S1", "Condition", "c1", "Hypertension")],
+            )
+        ]
+
+        validation = validate_citations("## Current Issues\nDiabetes noted [S2]", supplied_sections)
+
+        assert validation.invalid_source_ids == {"S2"}
+
+    def test_agent_yields_and_prompts_with_supplied_sections(self, monkeypatch):
+        supplied_sections = [
+            SourceSection(
+                label="Patient (1)",
+                items=[_source_item("S1", "Patient", "patient-001", "Jane Doe")],
+            )
+        ]
+
+        def _fake_context_result(_sections):
+            return SourceContextResult(
+                text="=== Source-Indexed FHIR Context ===\n[S1] Patient/patient-001: Jane Doe",
+                sections=supplied_sections,
+                supplied_source_ids={"S1"},
+                truncated=True,
+            )
+
+        monkeypatch.setattr("src.agent.build_source_context_result", _fake_context_result)
+        agent, _, llm = _make_agent(stream_contents=("## Current Issues\n", "Jane Doe [S1]"))
+
+        chunks = list(agent.generate_summary_stream("patient-001", "ED Doctor"))
+        user_message = llm.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+
+        assert chunks[0][1] == supplied_sections
+        assert chunks[0][2] == SOURCE_CONTEXT_TRUNCATED_WARNING
+        assert "[S1]" in user_message
+        assert "[S2]" not in user_message
+
+    def test_citation_repair_prompt_uses_only_supplied_source_index(self, monkeypatch):
+        supplied_sections = [
+            SourceSection(
+                label="Conditions (1)",
+                items=[_source_item("S1", "Condition", "c1", "Hypertension")],
+            )
+        ]
+
+        def _fake_context_result(_sections):
+            return SourceContextResult(
+                text="=== Source-Indexed FHIR Context ===\n[S1] Condition/c1: Hypertension",
+                sections=supplied_sections,
+                supplied_source_ids={"S1"},
+                truncated=True,
+            )
+
+        llm = MagicMock()
+        llm.chat.completions.create.side_effect = [
+            [_stream_chunk("## Current Issues\nDiabetes noted [S2]")],
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "## Current Issues\nHypertension noted [S1]"
+                        }
+                    }
+                ]
+            },
+        ]
+        monkeypatch.setattr("src.agent.build_source_context_result", _fake_context_result)
+        agent = SummaryAgent(fhir_client=_make_fhir_client(), llm_client=llm)
+
+        chunks = list(agent.generate_summary_stream("patient-001", "ED Doctor"))
+        repair_user_prompt = llm.chat.completions.create.call_args_list[1].kwargs[
+            "messages"
+        ][1]["content"]
+        valid_source_index = repair_user_prompt.split("Valid source index:\n", 1)[1]
+
+        assert chunks[-1][0] == "## Current Issues\nHypertension noted [S1]"
+        assert "[S1]" in valid_source_index
+        assert "[S2]" not in valid_source_index
 
 
 class TestParseSectionsCompatibility:
