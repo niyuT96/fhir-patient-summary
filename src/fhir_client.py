@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
+from urllib.parse import urljoin
 
 import requests
 from requests.exceptions import ConnectionError, Timeout
@@ -40,6 +42,7 @@ _RESOURCE_DEFAULTS: dict[str, dict[str, str]] = {
 }
 
 _FHIR_JSON_HEADERS = {"Accept": "application/fhir+json"}
+DEFAULT_FHIR_MAX_PAGES = 10
 
 
 class FHIRClient:
@@ -68,6 +71,7 @@ class FHIRClient:
         self._base_url = base_url.rstrip("/")
         self._auth = (username, password)
         self._fallback_path = fallback_path
+        self.pagination_warnings: list[str] = []
 
     # ------------------------------------------------------------------
     # Public API
@@ -119,6 +123,7 @@ class FHIRClient:
                 f"Invalid resource type '{resource_type}'. "
                 f"Allowed types: {sorted(_ALLOWED_RESOURCE_TYPES)}"
             )
+        self._clear_pagination_warnings_for_resource(resource_type)
 
         # Build query parameters: start from type-specific defaults, then
         # overlay caller-supplied params (caller takes precedence).
@@ -136,24 +141,34 @@ class FHIRClient:
             if patient_id:
                 query["patient"] = patient_id
 
-        try:
-            response = requests.get(
-                url,
-                auth=self._auth,
-                headers=_FHIR_JSON_HEADERS,
-                params=query,
-                timeout=10,
+        max_pages = _env_int("FHIR_MAX_PAGES", DEFAULT_FHIR_MAX_PAGES, minimum=1)
+        bundles: list[dict] = []
+        next_url: str | None = url
+        next_params: dict[str, str] | None = query
+        pages_fetched = 0
+
+        while next_url and pages_fetched < max_pages:
+            bundle = self._request_bundle_page(next_url, next_params)
+            bundles.append(bundle)
+            pages_fetched += 1
+            next_link = _find_next_link(bundle)
+            next_url = _normalize_next_url(self._base_url, next_link) if next_link else None
+            next_params = None
+
+        if next_url:
+            warning = (
+                f"FHIR pagination stopped after {max_pages} pages for {resource_type}; "
+                "additional matching resources may not be included."
             )
-        except (Timeout, ConnectionError) as exc:
-            raise FHIRUnavailableError(
-                f"Could not reach FHIR server at {url}: {exc}"
-            ) from exc
+            logger.warning(
+                warning,
+            )
+            self.pagination_warnings.append(warning)
 
-        if response.status_code >= 400:
-            raise FHIRClientError(response.status_code, response.text)
-
-        bundle = response.json()
-        return self._parse_bundle_entries(bundle, resource_type)
+        results: list[dict] = []
+        for bundle in bundles:
+            results.extend(self._parse_bundle_entries(bundle, resource_type))
+        return results
 
     def list_patients(self) -> list[dict]:
         """Return a list of Patient resources.
@@ -167,6 +182,20 @@ class FHIRClient:
         # Server unavailable - parse local fallback bundle
         all_resources = self._load_fallback_bundle()
         return [r for r in all_resources if r.get("resourceType") == "Patient"]
+
+    def clear_pagination_warnings(self) -> None:
+        """Clear pagination warnings accumulated by live FHIR requests."""
+        self.pagination_warnings.clear()
+
+    def _clear_pagination_warnings_for_resource(self, resource_type: str) -> None:
+        """Remove stale pagination warnings for a new request of the same type."""
+        prefix = "FHIR pagination stopped after "
+        suffix = f" pages for {resource_type};"
+        self.pagination_warnings = [
+            warning
+            for warning in self.pagination_warnings
+            if not (warning.startswith(prefix) and suffix in warning)
+        ]
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -196,6 +225,30 @@ class FHIRClient:
             if resource.get("resourceType") == resource_type:
                 results.append(resource)
         return results
+
+    def _request_bundle_page(
+        self,
+        url: str,
+        params: dict[str, str] | None,
+    ) -> dict:
+        """Request one FHIR Bundle page and return parsed JSON."""
+        try:
+            response = requests.get(
+                url,
+                auth=self._auth,
+                headers=_FHIR_JSON_HEADERS,
+                params=params,
+                timeout=10,
+            )
+        except (Timeout, ConnectionError) as exc:
+            raise FHIRUnavailableError(
+                f"Could not reach FHIR server at {url}: {exc}"
+            ) from exc
+
+        if response.status_code >= 400:
+            raise FHIRClientError(response.status_code, response.text)
+
+        return response.json()
 
     def _load_fallback_bundle(self) -> list[dict]:
         """Read and parse local fallback bundle file(s).
@@ -246,3 +299,29 @@ class FHIRClient:
             if resource is not None:
                 results.append(resource)
         return results
+
+
+def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
+    raw_value = os.environ.get(name, "").strip()
+    if not raw_value:
+        return default
+    try:
+        value = int(raw_value)
+    except ValueError:
+        return default
+    if minimum is not None and value < minimum:
+        return default
+    return value
+
+
+def _find_next_link(bundle: dict) -> str | None:
+    for link in bundle.get("link", []):
+        if link.get("relation") == "next" and link.get("url"):
+            return str(link["url"])
+    return None
+
+
+def _normalize_next_url(base_url: str, next_url: str) -> str:
+    if next_url.startswith(("http://", "https://")):
+        return next_url
+    return urljoin(base_url.rstrip("/") + "/", next_url.lstrip("/"))

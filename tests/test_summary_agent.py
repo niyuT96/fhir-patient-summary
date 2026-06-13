@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.agent import (
+    CITATION_VALIDATION_WARNING,
     DEFAULT_OPENAI_MAX_TOKENS,
     DEFAULT_OPENAI_MODEL,
     DEFAULT_OPENAI_TEMPERATURE,
@@ -22,7 +23,7 @@ from src.agent import (
     parse_sections,
 )
 from src.exceptions import FHIRClientError, FHIRUnavailableError
-from src.models import PatientResources, SourceItem, SourceSection, SummaryResult
+from src.models import PatientResources, SourceItem, SourceScopeInfo, SourceSection, SummaryResult
 from src.tools.citation_validator import validate_citations
 from src.tools.prompt_loader import get_role_prompt
 from src.tools.source_items import SourceContextResult, build_source_context, build_source_context_result
@@ -99,7 +100,7 @@ def _make_agent(
     available=True,
     patient_resources=None,
     side_effects=None,
-    stream_contents: tuple[str, ...] = ("## Current Issues\n", "- Hypertension [S1]\n"),
+    stream_contents: tuple[str, ...] = ("## Current Issues\n", "- Jane Doe [S1]\n"),
 ):
     fhir = _make_fhir_client(
         available=available,
@@ -250,7 +251,7 @@ class TestStreamingSummary:
 
     def test_single_llm_stream_call_accumulates_markdown(self):
         agent, _, llm = _make_agent(
-            stream_contents=("## Current", " Issues\n", "- BP high [S1]")
+            stream_contents=("## Current", " Issues\n", "- Jane Doe [S1]")
         )
 
         chunks = list(agent.generate_summary_stream("patient-001", "ED Doctor"))
@@ -259,7 +260,7 @@ class TestStreamingSummary:
         call_kwargs = llm.chat.completions.create.call_args.kwargs
         assert call_kwargs["stream"] is True
         assert "=== Source-Indexed FHIR Context ===" in call_kwargs["messages"][1]["content"]
-        assert chunks[-1][0] == "## Current Issues\n- BP high [S1]"
+        assert chunks[-1][0] == "## Current Issues\n- Jane Doe [S1]"
 
     def test_streaming_throttles_intermediate_yields_but_keeps_first_and_final(
         self,
@@ -520,6 +521,90 @@ class TestSourceSections:
 
         assert validation.invalid_source_ids == {"S2"}
 
+    def test_validator_returns_cited_source_ids_by_summary_line(self):
+        supplied_sections = [
+            SourceSection(
+                label="Conditions (2)",
+                items=[
+                    _source_item("S1", "Condition", "c1", "Hypertension"),
+                    _source_item("S2", "Condition", "c2", "Diabetes"),
+                ],
+            )
+        ]
+
+        validation = validate_citations(
+            "## Current Issues\n- Hypertension and diabetes noted [S1, S2]",
+            supplied_sections,
+        )
+
+        assert len(validation.cited_lines) == 1
+        assert validation.cited_lines[0].text == "- Hypertension and diabetes noted [S1, S2]"
+        assert validation.cited_lines[0].source_ids == {"S1", "S2"}
+
+    def test_validator_flags_citation_that_does_not_support_line(self):
+        supplied_sections = [
+            SourceSection(
+                label="Conditions (1)",
+                items=[_source_item("S1", "Condition", "c1", "Hypertension")],
+            )
+        ]
+
+        validation = validate_citations("## Current Issues\nDiabetes noted [S1]", supplied_sections)
+
+        assert len(validation.unsupported_citations) == 1
+        assert validation.unsupported_citations[0].line == "Diabetes noted [S1]"
+        assert validation.unsupported_citations[0].source_ids == {"S1"}
+        assert validation.has_errors is True
+
+    def test_validator_does_not_flag_supported_citation(self):
+        supplied_sections = [
+            SourceSection(
+                label="Conditions (1)",
+                items=[_source_item("S1", "Condition", "c1", "Hypertension")],
+            )
+        ]
+
+        validation = validate_citations(
+            "## Current Issues\nHypertension noted [S1]",
+            supplied_sections,
+        )
+
+        assert validation.unsupported_citations == []
+
+    def test_validator_flags_patient_citation_that_does_not_support_line(self):
+        supplied_sections = [
+            SourceSection(
+                label="Patient (1)",
+                items=[_source_item("S1", "Patient", "patient-001", "Jane Doe")],
+            )
+        ]
+
+        validation = validate_citations(
+            "## Current Issues\nDiabetes noted [S1]",
+            supplied_sections,
+        )
+
+        assert len(validation.unsupported_citations) == 1
+        assert validation.unsupported_citations[0].source_ids == {"S1"}
+
+    def test_validator_does_not_flag_when_one_of_multiple_sources_supports_line(self):
+        supplied_sections = [
+            SourceSection(
+                label="Mixed (2)",
+                items=[
+                    _source_item("S1", "Patient", "patient-001", "Jane Doe"),
+                    _source_item("S2", "Condition", "c1", "Hypertension"),
+                ],
+            )
+        ]
+
+        validation = validate_citations(
+            "## Current Issues\nHypertension noted [S1, S2]",
+            supplied_sections,
+        )
+
+        assert validation.unsupported_citations == []
+
     def test_agent_yields_and_prompts_with_supplied_sections(self, monkeypatch):
         supplied_sections = [
             SourceSection(
@@ -546,6 +631,61 @@ class TestSourceSections:
         assert chunks[0][2] == SOURCE_CONTEXT_TRUNCATED_WARNING
         assert "[S1]" in user_message
         assert "[S2]" not in user_message
+
+    def test_agent_retrieves_sources_before_building_supplied_context(self, monkeypatch):
+        monkeypatch.setenv("VECTOR_SEARCH_MAX_ITEMS", "2")
+        all_sections = [
+            SourceSection(
+                label="Patient (1)",
+                items=[_source_item("S1", "Patient", "patient-001", "Jane Doe")],
+            ),
+            SourceSection(
+                label="Conditions (2)",
+                items=[
+                    _source_item("S2", "Condition", "c1", "Hypertension"),
+                    _source_item("S3", "Condition", "c2", "Diabetes"),
+                ],
+            ),
+        ]
+        monkeypatch.setattr(
+            "src.agent.build_patient_scope_retrieval_query",
+            lambda _role: "hypertension",
+        )
+        agent, _, llm = _make_agent(
+            stream_contents=("## Current Issues\nHypertension noted [S2]",)
+        )
+        monkeypatch.setattr(agent, "_build_source_sections", lambda _resources: all_sections)
+
+        chunks = list(agent.generate_summary_stream("patient-001", "ED Doctor"))
+        user_message = llm.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+
+        assert [item.source_id for section in chunks[0][1] for item in section.items] == [
+            "S1",
+            "S2",
+        ]
+        assert "[S2]" in user_message
+        assert "[S3]" not in user_message
+        assert isinstance(chunks[0][5], SourceScopeInfo)
+        assert chunks[0][5].retrieved_source_ids == {"S1", "S2"}
+        assert chunks[0][5].supplied_source_ids == {"S1", "S2"}
+
+    def test_agent_final_chunk_includes_validation_and_cited_scope(self):
+        supplied_sections = [
+            SourceSection(
+                label="Conditions (1)",
+                items=[_source_item("S1", "Condition", "c1", "Hypertension")],
+            )
+        ]
+        agent, _, _ = _make_agent(
+            stream_contents=("## Current Issues\nHypertension noted [S1]",)
+        )
+        agent._build_source_sections = lambda _resources: supplied_sections
+
+        chunks = list(agent.generate_summary_stream("patient-001", "ED Doctor"))
+
+        assert len(chunks[-1]) == 6
+        assert chunks[-1][4].has_errors is False
+        assert chunks[-1][5].cited_source_ids == {"S1"}
 
     def test_citation_repair_prompt_uses_only_supplied_source_index(self, monkeypatch):
         supplied_sections = [
@@ -588,6 +728,238 @@ class TestSourceSections:
         assert chunks[-1][0] == "## Current Issues\nHypertension noted [S1]"
         assert "[S1]" in valid_source_index
         assert "[S2]" not in valid_source_index
+
+    def test_citation_repair_prompt_includes_cited_source_evidence_by_line(self, monkeypatch):
+        supplied_sections = [
+            SourceSection(
+                label="Conditions (1)",
+                items=[_source_item("S1", "Condition", "c1", "Hypertension")],
+            )
+        ]
+
+        def _fake_context_result(_sections):
+            return SourceContextResult(
+                text="=== Source-Indexed FHIR Context ===\n[S1] Condition/c1: Hypertension",
+                sections=supplied_sections,
+                supplied_source_ids={"S1"},
+                truncated=False,
+            )
+
+        llm = MagicMock()
+        llm.chat.completions.create.side_effect = [
+            [_stream_chunk("## Current Issues\nDiabetes noted without citation\nHypertension [S1]")],
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "## Current Issues\nHypertension noted [S1]"
+                        }
+                    }
+                ]
+            },
+        ]
+        monkeypatch.setattr("src.agent.build_source_context_result", _fake_context_result)
+        agent = SummaryAgent(fhir_client=_make_fhir_client(), llm_client=llm)
+
+        list(agent.generate_summary_stream("patient-001", "ED Doctor"))
+
+        repair_user_prompt = llm.chat.completions.create.call_args_list[1].kwargs[
+            "messages"
+        ][1]["content"]
+        assert "Cited source evidence by summary line:" in repair_user_prompt
+        assert "- Summary line: Hypertension [S1]" in repair_user_prompt
+        assert "[S1] Condition/c1: Hypertension" in repair_user_prompt
+        assert "summary: Hypertension" in repair_user_prompt
+
+    def test_unsupported_citation_triggers_repair(self, monkeypatch):
+        supplied_sections = [
+            SourceSection(
+                label="Conditions (1)",
+                items=[_source_item("S1", "Condition", "c1", "Hypertension")],
+            )
+        ]
+
+        def _fake_context_result(_sections):
+            return SourceContextResult(
+                text="=== Source-Indexed FHIR Context ===\n[S1] Condition/c1: Hypertension",
+                sections=supplied_sections,
+                supplied_source_ids={"S1"},
+                truncated=False,
+            )
+
+        llm = MagicMock()
+        llm.chat.completions.create.side_effect = [
+            [_stream_chunk("## Current Issues\nDiabetes noted [S1]")],
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "## Current Issues\nHypertension noted [S1]"
+                        }
+                    }
+                ]
+            },
+        ]
+        monkeypatch.setattr("src.agent.build_source_context_result", _fake_context_result)
+        agent = SummaryAgent(fhir_client=_make_fhir_client(), llm_client=llm)
+
+        chunks = list(agent.generate_summary_stream("patient-001", "ED Doctor"))
+        repair_user_prompt = llm.chat.completions.create.call_args_list[1].kwargs[
+            "messages"
+        ][1]["content"]
+
+        assert "may not support the stated fact" in repair_user_prompt
+        assert chunks[-1][0] == "## Current Issues\nHypertension noted [S1]"
+        assert chunks[-1][3] == ""
+
+    def test_repair_residual_errors_return_citation_warning(self, monkeypatch):
+        supplied_sections = [
+            SourceSection(
+                label="Conditions (1)",
+                items=[_source_item("S1", "Condition", "c1", "Hypertension")],
+            )
+        ]
+
+        def _fake_context_result(_sections):
+            return SourceContextResult(
+                text="=== Source-Indexed FHIR Context ===\n[S1] Condition/c1: Hypertension",
+                sections=supplied_sections,
+                supplied_source_ids={"S1"},
+                truncated=False,
+            )
+
+        llm = MagicMock()
+        llm.chat.completions.create.side_effect = [
+            [_stream_chunk("## Current Issues\nDiabetes noted [S1]")],
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "## Current Issues\nDiabetes still noted [S1]"
+                        }
+                    }
+                ]
+            },
+        ]
+        monkeypatch.setattr("src.agent.build_source_context_result", _fake_context_result)
+        agent = SummaryAgent(fhir_client=_make_fhir_client(), llm_client=llm)
+
+        chunks = list(agent.generate_summary_stream("patient-001", "ED Doctor"))
+
+        assert chunks[-1][0] == "## Current Issues\nDiabetes still noted [S1]"
+        assert chunks[-1][3] == CITATION_VALIDATION_WARNING
+
+    def test_repair_residual_invalid_source_ids_return_citation_warning(self, monkeypatch):
+        supplied_sections = [
+            SourceSection(
+                label="Conditions (1)",
+                items=[_source_item("S1", "Condition", "c1", "Hypertension")],
+            )
+        ]
+
+        def _fake_context_result(_sections):
+            return SourceContextResult(
+                text="=== Source-Indexed FHIR Context ===\n[S1] Condition/c1: Hypertension",
+                sections=supplied_sections,
+                supplied_source_ids={"S1"},
+                truncated=False,
+            )
+
+        llm = MagicMock()
+        llm.chat.completions.create.side_effect = [
+            [_stream_chunk("## Current Issues\nHypertension noted [S2]")],
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "## Current Issues\nHypertension still noted [S2]"
+                        }
+                    }
+                ]
+            },
+        ]
+        monkeypatch.setattr("src.agent.build_source_context_result", _fake_context_result)
+        agent = SummaryAgent(fhir_client=_make_fhir_client(), llm_client=llm)
+
+        chunks = list(agent.generate_summary_stream("patient-001", "ED Doctor"))
+
+        assert chunks[-1][0] == "## Current Issues\nHypertension still noted [S2]"
+        assert chunks[-1][3] == CITATION_VALIDATION_WARNING
+
+    def test_repair_residual_uncited_lines_return_citation_warning(self, monkeypatch):
+        supplied_sections = [
+            SourceSection(
+                label="Conditions (1)",
+                items=[_source_item("S1", "Condition", "c1", "Hypertension")],
+            )
+        ]
+
+        def _fake_context_result(_sections):
+            return SourceContextResult(
+                text="=== Source-Indexed FHIR Context ===\n[S1] Condition/c1: Hypertension",
+                sections=supplied_sections,
+                supplied_source_ids={"S1"},
+                truncated=False,
+            )
+
+        llm = MagicMock()
+        llm.chat.completions.create.side_effect = [
+            [_stream_chunk("## Current Issues\nHypertension remains elevated today")],
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "## Current Issues\nHypertension remains elevated today"
+                        }
+                    }
+                ]
+            },
+        ]
+        monkeypatch.setattr("src.agent.build_source_context_result", _fake_context_result)
+        agent = SummaryAgent(fhir_client=_make_fhir_client(), llm_client=llm)
+
+        chunks = list(agent.generate_summary_stream("patient-001", "ED Doctor"))
+
+        assert chunks[-1][0] == "## Current Issues\nHypertension remains elevated today"
+        assert chunks[-1][3] == CITATION_VALIDATION_WARNING
+
+    def test_strict_mode_returns_error_when_citation_errors_remain(self, monkeypatch):
+        monkeypatch.setenv("CITATION_STRICT_MODE", "true")
+        monkeypatch.setenv("CITATION_REPAIR_ENABLED", "false")
+        supplied_sections = [
+            SourceSection(
+                label="Conditions (1)",
+                items=[_source_item("S1", "Condition", "c1", "Hypertension")],
+            )
+        ]
+
+        def _fake_context_result(_sections):
+            return SourceContextResult(
+                text="=== Source-Indexed FHIR Context ===\n[S1] Condition/c1: Hypertension",
+                sections=supplied_sections,
+                supplied_source_ids={"S1"},
+                truncated=False,
+            )
+
+        monkeypatch.setattr("src.agent.build_source_context_result", _fake_context_result)
+        agent, _, _ = _make_agent(stream_contents=("## Current Issues\nDiabetes noted [S1]",))
+
+        chunks = list(agent.generate_summary_stream("patient-001", "ED Doctor"))
+
+        assert chunks[-1][0].startswith("**Error:** Citation validation failed")
+        assert chunks[-1][3] == ""
+
+    def test_pagination_warnings_are_yielded_with_source_warning(self):
+        fhir = _make_fhir_client()
+        fhir.pagination_warnings = [
+            "FHIR pagination stopped after 1 pages for Observation; additional matching resources may not be included."
+        ]
+        llm = _make_llm_stream("## Current Issues\n- Hypertension [S1]")
+        agent = SummaryAgent(fhir_client=fhir, llm_client=llm)
+
+        chunks = list(agent.generate_summary_stream("patient-001", "ED Doctor"))
+
+        assert "FHIR pagination stopped" in chunks[0][2]
 
 
 class TestParseSectionsCompatibility:

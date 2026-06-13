@@ -8,15 +8,23 @@ from __future__ import annotations
 import logging
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 from src.exceptions import FHIRClientError, FHIRUnavailableError
-from src.models import PatientResources, SourceSection, SummaryResult
+from src.models import PatientResources, SourceScopeInfo, SourceSection, SummaryResult
 from src.tools.citation_repair import repair_summary_citations
-from src.tools.citation_validator import validate_citations
+from src.tools.citation_validator import CitationValidationResult, validate_citations
 from src.tools.prompt_loader import get_role_prompt, get_supported_roles
 from src.tools.source_items import build_source_context_result, build_source_sections
+from src.tools.vector_search import (
+    DEFAULT_VECTOR_SEARCH_BACKEND,
+    DEFAULT_VECTOR_SEARCH_EMBEDDING_MODEL,
+    DEFAULT_VECTOR_SEARCH_ENABLED,
+    DEFAULT_VECTOR_SEARCH_MAX_ITEMS,
+    build_patient_scope_retrieval_query,
+    retrieve_patient_scoped_source_sections,
+)
 
 if TYPE_CHECKING:
     from src.fhir_client import FHIRClient
@@ -34,6 +42,10 @@ SOURCE_CONTEXT_TRUNCATED_WARNING = (
     "Source context was truncated. Reference Data Sources shows only source "
     "items supplied to the model."
 )
+CITATION_VALIDATION_WARNING = (
+    "Citation validation still found issues after repair. Some lines may have "
+    "missing, invalid, or unsupported citations."
+)
 
 
 @dataclass(frozen=True)
@@ -42,6 +54,13 @@ class ModelConfig:
     temperature: float
     max_tokens: int
     stream_throttle_seconds: float
+
+
+@dataclass(frozen=True)
+class CitationRepairResult:
+    summary: str
+    warning: str
+    validation: CitationValidationResult
 
 
 def _env_float(name: str, default: float, *, minimum: float | None = None) -> float:
@@ -360,6 +379,9 @@ class SummaryAgent:
         # --- Data fetch (same logic as generate_summary) ---
         try:
             if self._fhir.is_available():
+                clear_warnings = getattr(self._fhir, "clear_pagination_warnings", None)
+                if callable(clear_warnings):
+                    clear_warnings()
                 fetch_result = _fetch_all_fhir_resources(self._fhir, patient_id)
                 if isinstance(fetch_result, SummaryResult):
                     yield f"**Error:** {fetch_result.error}", [], ""
@@ -376,7 +398,24 @@ class SummaryAgent:
             return
 
         all_source_sections = self._build_source_sections(resources)
-        source_context_result = build_source_context_result(all_source_sections)
+        retrieval_result = retrieve_patient_scoped_source_sections(
+            all_source_sections,
+            query=build_patient_scope_retrieval_query(role),
+            llm_client=self._llm,
+            enabled=_env_bool("VECTOR_SEARCH_ENABLED", DEFAULT_VECTOR_SEARCH_ENABLED),
+            max_items=_env_int(
+                "VECTOR_SEARCH_MAX_ITEMS",
+                DEFAULT_VECTOR_SEARCH_MAX_ITEMS,
+                minimum=1,
+            ),
+            backend=os.environ.get("VECTOR_SEARCH_BACKEND", DEFAULT_VECTOR_SEARCH_BACKEND),
+            embedding_model=os.environ.get(
+                "VECTOR_SEARCH_EMBEDDING_MODEL",
+                DEFAULT_VECTOR_SEARCH_EMBEDDING_MODEL,
+            ).strip()
+            or DEFAULT_VECTOR_SEARCH_EMBEDDING_MODEL,
+        )
+        source_context_result = build_source_context_result(retrieval_result.sections)
         source_sections = source_context_result.sections
         source_context = source_context_result.text
         source_warning = (
@@ -384,10 +423,22 @@ class SummaryAgent:
             if source_context_result.truncated
             else ""
         )
+        if retrieval_result.warning:
+            source_warning = _join_warnings(source_warning, retrieval_result.warning)
+        pagination_warnings = getattr(self._fhir, "pagination_warnings", [])
+        if not isinstance(pagination_warnings, list):
+            pagination_warnings = []
+        if pagination_warnings:
+            source_warning = _join_warnings(source_warning, *pagination_warnings)
+        source_scope = SourceScopeInfo(
+            retrieved_source_ids=retrieval_result.retrieved_source_ids,
+            supplied_source_ids=source_context_result.supplied_source_ids,
+            retrieval_strategy=retrieval_result.backend,
+        )
         system_prompt = get_role_prompt(role)
 
         # Let the UI show reference data before waiting for any LLM response.
-        yield "", source_sections, source_warning
+        yield "", source_sections, source_warning, "", None, source_scope
 
         try:
             config = _get_model_config()
@@ -423,20 +474,31 @@ class SummaryAgent:
                 if not first_chunk_seen:
                     first_chunk_seen = True
                     last_yield_at = now
-                    yield accumulated, source_sections, source_warning
+                    yield accumulated, source_sections, source_warning, "", None, source_scope
                     continue
 
                 if now - last_yield_at >= config.stream_throttle_seconds:
                     last_yield_at = now
-                    yield accumulated, source_sections, source_warning
+                    yield accumulated, source_sections, source_warning, "", None, source_scope
 
             if accumulated:
-                accumulated = self._repair_citations_if_needed(
+                repair_result = self._repair_citations_if_needed(
                     accumulated,
                     source_sections,
                     config,
                 )
-                yield accumulated, source_sections, source_warning
+                final_scope = replace(
+                    source_scope,
+                    cited_source_ids=_cited_source_ids(repair_result.validation),
+                )
+                yield (
+                    repair_result.summary,
+                    source_sections,
+                    source_warning,
+                    repair_result.warning,
+                    repair_result.validation,
+                    final_scope,
+                )
 
         except Exception as llm_exc:  # noqa: BLE001
             logger.exception("LLM stream generation error: %s", llm_exc)
@@ -447,11 +509,11 @@ class SummaryAgent:
         summary: str,
         source_sections: list[SourceSection],
         config: ModelConfig,
-    ) -> str:
+    ) -> CitationRepairResult:
         """Validate final summary citations and optionally repair them once."""
         validation = validate_citations(summary, source_sections)
         if not validation.has_errors:
-            return summary
+            return CitationRepairResult(summary=summary, warning="", validation=validation)
 
         max_attempts = _env_int(
             "CITATION_REPAIR_MAX_ATTEMPTS",
@@ -478,17 +540,44 @@ class SummaryAgent:
                     break
                 validation = validate_citations(repaired, source_sections)
                 if not validation.has_errors:
-                    return repaired
+                    return CitationRepairResult(summary=repaired, warning="", validation=validation)
 
         if strict_mode and validation.has_errors:
-            details = []
-            if validation.invalid_source_ids:
-                details.append(f"invalid source ids: {sorted(validation.invalid_source_ids)}")
-            if validation.uncited_lines:
-                details.append(f"uncited lines: {len(validation.uncited_lines)}")
-            return "**Error:** Citation validation failed (" + "; ".join(details) + ")"
+            return CitationRepairResult(
+                summary="**Error:** Citation validation failed ("
+                + "; ".join(_citation_validation_details(validation))
+                + ")",
+                warning="",
+                validation=validation,
+            )
 
-        return repaired
+        return CitationRepairResult(
+            summary=repaired,
+            warning=CITATION_VALIDATION_WARNING,
+            validation=validation,
+        )
+
+
+def _citation_validation_details(validation: CitationValidationResult) -> list[str]:
+    details = []
+    if validation.invalid_source_ids:
+        details.append(f"invalid source ids: {sorted(validation.invalid_source_ids)}")
+    if validation.uncited_lines:
+        details.append(f"uncited lines: {len(validation.uncited_lines)}")
+    if validation.unsupported_citations:
+        details.append(f"unsupported citations: {len(validation.unsupported_citations)}")
+    return details or ["unknown citation error"]
+
+
+def _cited_source_ids(validation: CitationValidationResult) -> set[str]:
+    cited_ids: set[str] = set()
+    for cited_line in validation.cited_lines:
+        cited_ids.update(cited_line.source_ids)
+    return cited_ids
+
+
+def _join_warnings(*warnings: str) -> str:
+    return "\n".join(warning for warning in warnings if warning)
 
 
 def _extract_stream_delta(chunk) -> str:

@@ -2,7 +2,8 @@ import importlib
 from datetime import date
 from unittest.mock import MagicMock, patch
 
-from src.models import SourceItem, SourceSection
+from src.models import SourceItem, SourceScopeInfo, SourceSection
+from src.tools.citation_validator import validate_citations
 
 
 def _load_app_module(monkeypatch):
@@ -131,6 +132,74 @@ def test_sources_html_displays_source_warning(monkeypatch):
     assert "Source context was truncated." in html
 
 
+def test_sources_html_displays_warning_without_source_items(monkeypatch):
+    app = _load_app_module(monkeypatch)
+    html = app._build_sources_html(
+        [],
+        "local_fallback",
+        "Source context was truncated.",
+    )
+
+    assert "Source context was truncated." in html
+    assert "Data Source: Local Fallback" in html
+
+
+def test_sources_html_displays_citation_warning(monkeypatch):
+    app = _load_app_module(monkeypatch)
+    html = app._build_sources_html(
+        [],
+        "local_fallback",
+        "",
+        "Citation validation still found issues after repair.",
+    )
+
+    assert "Citation validation still found issues after repair." in html
+
+
+def test_sources_html_displays_retrieved_supplied_and_cited_scope(monkeypatch):
+    app = _load_app_module(monkeypatch)
+    source = _source_item("S1", "Hypertension")
+    sections = [SourceSection(label="Conditions (1)", items=[source])]
+    validation = validate_citations("## Current Issues\nHypertension noted [S1]", sections)
+
+    html = app._build_sources_html(
+        sections,
+        "local_fallback",
+        "",
+        "",
+        validation,
+        SourceScopeInfo(
+            retrieved_source_ids={"S1", "S2"},
+            supplied_source_ids={"S1"},
+            cited_source_ids={"S1"},
+            retrieval_strategy="local",
+        ),
+    )
+
+    assert "2 retrieved patient-scoped" in html
+    assert "1 supplied to the model" in html
+    assert "1 cited in the final summary" in html
+    assert "This panel lists supplied source items only." in html
+
+
+def test_sources_html_displays_citation_warning_details(monkeypatch):
+    app = _load_app_module(monkeypatch)
+    source = _source_item("S1", "Hypertension")
+    sections = [SourceSection(label="Conditions (1)", items=[source])]
+    validation = validate_citations("## Current Issues\nDiabetes noted [S2]", sections)
+
+    html = app._build_sources_html(
+        sections,
+        "local_fallback",
+        "",
+        "Citation validation still found issues after repair.",
+        validation,
+    )
+
+    assert "invalid ids: S2" in html
+    assert "unsupported-looking citations" not in html
+
+
 def test_on_generate_uses_generator_end_as_completion_signal(monkeypatch):
     app = _load_app_module(monkeypatch)
 
@@ -196,6 +265,93 @@ def test_on_generate_displays_truncated_source_warning(monkeypatch):
 
     assert "Source context was truncated." in outputs[1][3]
     assert "Source context was truncated." in outputs[-1][3]
+
+
+def test_on_generate_displays_warning_when_no_sources_are_supplied(monkeypatch):
+    app = _load_app_module(monkeypatch)
+
+    class FakeAgent:
+        def generate_summary_stream(self, patient_id, role):
+            yield "", [], "Source context was truncated.", ""
+            yield "## Current Issues\n- No supplied sources", [], "Source context was truncated.", ""
+
+    monkeypatch.setattr(app, "_agent", FakeAgent())
+    monkeypatch.setattr(app, "_patient_id_map", {"Jane Doe": "patient-001"})
+    monkeypatch.setattr(app, "_data_source_label", "local_fallback")
+
+    outputs = list(app.on_generate("Jane Doe", "ED Doctor"))
+
+    assert "Source context was truncated." in outputs[1][3]
+    assert "Source context was truncated." in outputs[-1][3]
+
+
+def test_on_generate_displays_citation_warning(monkeypatch):
+    app = _load_app_module(monkeypatch)
+
+    class FakeAgent:
+        def generate_summary_stream(self, patient_id, role):
+            yield "", [
+                SourceSection(
+                    label="Conditions (1)",
+                    items=[_source_item()],
+                )
+            ], "", ""
+            yield "## Current Issues\n- Hypertension", [
+                SourceSection(
+                    label="Conditions (1)",
+                    items=[_source_item()],
+                )
+            ], "", "Citation validation still found issues after repair."
+
+    monkeypatch.setattr(app, "_agent", FakeAgent())
+    monkeypatch.setattr(app, "_patient_id_map", {"Jane Doe": "patient-001"})
+    monkeypatch.setattr(app, "_data_source_label", "local_fallback")
+
+    outputs = list(app.on_generate("Jane Doe", "ED Doctor"))
+
+    assert "Citation validation still found issues after repair." in outputs[-1][3]
+
+
+def test_on_generate_accepts_validation_and_source_scope(monkeypatch):
+    app = _load_app_module(monkeypatch)
+    sections = [
+        SourceSection(
+            label="Conditions (1)",
+            items=[_source_item()],
+        )
+    ]
+    validation = validate_citations("## Current Issues\nHypertension noted [S1]", sections)
+
+    class FakeAgent:
+        def generate_summary_stream(self, patient_id, role):
+            yield "", sections, "", "", None, SourceScopeInfo(
+                retrieved_source_ids={"S1", "S2"},
+                supplied_source_ids={"S1"},
+                retrieval_strategy="local",
+            )
+            yield (
+                "## Current Issues\nHypertension noted [S1]",
+                sections,
+                "",
+                "",
+                validation,
+                SourceScopeInfo(
+                    retrieved_source_ids={"S1", "S2"},
+                    supplied_source_ids={"S1"},
+                    cited_source_ids={"S1"},
+                    retrieval_strategy="local",
+                ),
+            )
+
+    monkeypatch.setattr(app, "_agent", FakeAgent())
+    monkeypatch.setattr(app, "_patient_id_map", {"Jane Doe": "patient-001"})
+    monkeypatch.setattr(app, "_data_source_label", "local_fallback")
+
+    outputs = list(app.on_generate("Jane Doe", "ED Doctor"))
+
+    assert "2 retrieved patient-scoped" in outputs[-1][3]
+    assert "1 supplied to the model" in outputs[-1][3]
+    assert "1 cited in the final summary" in outputs[-1][3]
 
 
 def test_on_generate_recovers_button_if_agent_yields_nothing(monkeypatch):

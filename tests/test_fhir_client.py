@@ -227,6 +227,111 @@ class TestGetResourceBundleParsing:
 
         assert result == []
 
+    def test_follows_bundle_next_links_and_merges_matching_resources(self):
+        client = make_client()
+        first_bundle = {
+            "resourceType": "Bundle",
+            "type": "searchset",
+            "entry": [{"resource": {"resourceType": "Observation", "id": "o1"}}],
+            "link": [
+                {
+                    "relation": "next",
+                    "url": "http://localhost:52773/fhir/r4/Observation?page=2",
+                }
+            ],
+        }
+        second_bundle = _bundle_with([
+            {"resource": {"resourceType": "Observation", "id": "o2"}},
+            {"resource": {"resourceType": "Condition", "id": "c1"}},
+        ])
+        first_response = MagicMock(status_code=200)
+        first_response.json.return_value = first_bundle
+        second_response = MagicMock(status_code=200)
+        second_response.json.return_value = second_bundle
+
+        with patch(
+            "src.fhir_client.requests.get",
+            side_effect=[first_response, second_response],
+        ) as mock_get:
+            result = client.get_resource("Observation", "patient-1")
+
+        assert [resource["id"] for resource in result] == ["o1", "o2"]
+        assert mock_get.call_count == 2
+        assert mock_get.call_args_list[0].kwargs["params"]["patient"] == "patient-1"
+        assert mock_get.call_args_list[1].args[0].endswith("/Observation?page=2")
+        assert mock_get.call_args_list[1].kwargs["params"] is None
+
+    def test_next_page_http_error_raises_fhir_client_error(self):
+        client = make_client()
+        first_bundle = {
+            "resourceType": "Bundle",
+            "type": "searchset",
+            "entry": [{"resource": {"resourceType": "Condition", "id": "c1"}}],
+            "link": [{"relation": "next", "url": "Condition?page=2"}],
+        }
+        first_response = MagicMock(status_code=200)
+        first_response.json.return_value = first_bundle
+        error_response = MagicMock(status_code=500)
+        error_response.text = "next page failed"
+
+        with patch(
+            "src.fhir_client.requests.get",
+            side_effect=[first_response, error_response],
+        ):
+            with pytest.raises(FHIRClientError) as exc_info:
+                client.get_resource("Condition", "patient-1")
+
+        assert exc_info.value.status_code == 500
+
+    def test_pagination_respects_fhir_max_pages(self, monkeypatch):
+        monkeypatch.setenv("FHIR_MAX_PAGES", "1")
+        client = make_client()
+        bundle = {
+            "resourceType": "Bundle",
+            "type": "searchset",
+            "entry": [{"resource": {"resourceType": "Patient", "id": "p1"}}],
+            "link": [
+                {
+                    "relation": "next",
+                    "url": "http://localhost:52773/fhir/r4/Patient?page=2",
+                }
+            ],
+        }
+        response = MagicMock(status_code=200)
+        response.json.return_value = bundle
+
+        with patch("src.fhir_client.requests.get", return_value=response) as mock_get:
+            result = client.get_resource("Patient", "")
+
+        assert [resource["id"] for resource in result] == ["p1"]
+        assert mock_get.call_count == 1
+        assert len(client.pagination_warnings) == 1
+        assert "FHIR pagination stopped after 1 pages for Patient" in client.pagination_warnings[0]
+
+    def test_clear_pagination_warnings(self):
+        client = make_client()
+        client.pagination_warnings.append("old warning")
+
+        client.clear_pagination_warnings()
+
+        assert client.pagination_warnings == []
+
+    def test_get_resource_clears_stale_warning_for_same_resource_type(self):
+        client = make_client()
+        client.pagination_warnings = [
+            "FHIR pagination stopped after 1 pages for Observation; additional matching resources may not be included.",
+            "FHIR pagination stopped after 1 pages for Patient; additional matching resources may not be included.",
+        ]
+        response = MagicMock(status_code=200)
+        response.json.return_value = _bundle_with([])
+
+        with patch("src.fhir_client.requests.get", return_value=response):
+            client.get_resource("Observation", "patient-1")
+
+        assert client.pagination_warnings == [
+            "FHIR pagination stopped after 1 pages for Patient; additional matching resources may not be included."
+        ]
+
 
 class TestGetResourceURLBuilding:
     def test_patient_resource_uses_id_param(self):
@@ -521,3 +626,18 @@ class TestListPatients:
                 _, kwargs = mock_get.call_args
                 # empty patient_id means no _id filter
                 assert "_id" not in kwargs["params"] or kwargs["params"]["_id"] == ""
+
+    def test_list_patients_live_clears_stale_patient_pagination_warning(self):
+        client = make_client()
+        client.pagination_warnings = [
+            "FHIR pagination stopped after 1 pages for Patient; additional matching resources may not be included."
+        ]
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = _bundle_with([])
+
+        with patch.object(client, "is_available", return_value=True):
+            with patch("src.fhir_client.requests.get", return_value=mock_response):
+                client.list_patients()
+
+        assert client.pagination_warnings == []

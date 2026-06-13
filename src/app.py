@@ -18,7 +18,8 @@ from openai import OpenAI
 
 from src.agent import SUPPORTED_ROLES, SummaryAgent
 from src.fhir_client import FHIRClient
-from src.models import SourceItem, SourceSection
+from src.models import SourceItem, SourceScopeInfo, SourceSection
+from src.tools.citation_validator import CitationValidationResult
 
 load_dotenv()
 
@@ -150,9 +151,18 @@ def _build_sources_html(
     sections: list[SourceSection],
     data_source: str,
     source_warning: str = "",
+    citation_warning: str = "",
+    citation_validation: CitationValidationResult | None = None,
+    source_scope: SourceScopeInfo | None = None,
 ) -> str:
     """Render reference FHIR values as a styled HTML block for the UI."""
-    if not sections:
+    if (
+        not sections
+        and not source_warning
+        and not citation_warning
+        and citation_validation is None
+        and source_scope is None
+    ):
         return ""
 
     badge_color = "#16a34a" if data_source == "fhir_server" else "#d97706"
@@ -176,6 +186,20 @@ def _build_sources_html(
             f"{escape(source_warning)}"
             "</div>"
         )
+    if citation_warning:
+        citation_details = _citation_warning_details(citation_validation)
+        lines.append(
+            '<div style="background:#fef2f2;border:1px solid #f87171;'
+            'border-radius:6px;padding:8px 10px;margin-bottom:10px;'
+            'color:#991b1b;font-size:0.9em;">'
+            f"{escape(citation_warning)}"
+            f"{citation_details}"
+            "</div>"
+        )
+
+    scope_html = _render_source_scope_summary(sections, source_scope, citation_validation)
+    if scope_html:
+        lines.append(scope_html)
 
     for section in sections:
         if not section.items:
@@ -193,6 +217,66 @@ def _build_sources_html(
 
     lines.append("</div>")
     return "\n".join(lines)
+
+
+def _render_source_scope_summary(
+    sections: list[SourceSection],
+    source_scope: SourceScopeInfo | None,
+    citation_validation: CitationValidationResult | None,
+) -> str:
+    supplied_ids = _source_ids_from_sections(sections)
+    retrieved_ids = source_scope.retrieved_source_ids if source_scope else supplied_ids
+    supplied_ids = source_scope.supplied_source_ids if source_scope else supplied_ids
+    cited_ids = (
+        source_scope.cited_source_ids
+        if source_scope and source_scope.cited_source_ids
+        else _cited_source_ids(citation_validation)
+    )
+    strategy = source_scope.retrieval_strategy if source_scope else ""
+    strategy_label = f" via {escape(strategy)} retrieval" if strategy else ""
+
+    return (
+        '<div style="background:#eef2ff;border:1px solid #c7d2fe;'
+        'border-radius:6px;padding:8px 10px;margin-bottom:10px;'
+        'color:#3730a3;font-size:0.9em;">'
+        f"Source scope{strategy_label}: "
+        f"{len(retrieved_ids)} retrieved patient-scoped, "
+        f"{len(supplied_ids)} supplied to the model, "
+        f"{len(cited_ids)} cited in the final summary. "
+        "This panel lists supplied source items only."
+        "</div>"
+    )
+
+
+def _citation_warning_details(validation: CitationValidationResult | None) -> str:
+    if validation is None or not validation.has_errors:
+        return ""
+    details = []
+    if validation.invalid_source_ids:
+        details.append(
+            "invalid ids: "
+            + ", ".join(escape(source_id) for source_id in sorted(validation.invalid_source_ids))
+        )
+    if validation.uncited_lines:
+        details.append(f"uncited factual lines: {len(validation.uncited_lines)}")
+    if validation.unsupported_citations:
+        details.append(f"unsupported-looking citations: {len(validation.unsupported_citations)}")
+    if not details:
+        return ""
+    return "<br>" + escape("; ".join(details))
+
+
+def _source_ids_from_sections(sections: list[SourceSection]) -> set[str]:
+    return {item.source_id for section in sections for item in section.items}
+
+
+def _cited_source_ids(validation: CitationValidationResult | None) -> set[str]:
+    if validation is None:
+        return set()
+    cited_ids: set[str] = set()
+    for cited_line in validation.cited_lines:
+        cited_ids.update(cited_line.source_ids)
+    return cited_ids
 
 
 def _render_source_item(item: SourceItem) -> str:
@@ -268,15 +352,40 @@ def on_generate(
     data_source = _data_source_label
     accumulated_sources: list[SourceSection] = []
     accumulated_source_warning = ""
+    accumulated_citation_warning = ""
+    accumulated_citation_validation: CitationValidationResult | None = None
+    accumulated_source_scope: SourceScopeInfo | None = None
     final_text = ""
     final_sources_html = ""
 
     for stream_chunk in _agent.generate_summary_stream(patient_id, role):
-        if len(stream_chunk) == 3:
+        if len(stream_chunk) == 6:
+            (
+                partial_text,
+                source_sections,
+                source_warning,
+                citation_warning,
+                citation_validation,
+                source_scope,
+            ) = stream_chunk
+        elif len(stream_chunk) == 5:
+            partial_text, source_sections, source_warning, citation_warning, citation_validation = stream_chunk
+            source_scope = None
+        elif len(stream_chunk) == 4:
+            partial_text, source_sections, source_warning, citation_warning = stream_chunk
+            citation_validation = None
+            source_scope = None
+        elif len(stream_chunk) == 3:
             partial_text, source_sections, source_warning = stream_chunk
+            citation_warning = ""
+            citation_validation = None
+            source_scope = None
         else:
             partial_text, source_sections = stream_chunk
             source_warning = ""
+            citation_warning = ""
+            citation_validation = None
+            source_scope = None
 
         is_error = partial_text.startswith("**Error:**")
         final_text = partial_text
@@ -285,11 +394,20 @@ def on_generate(
             accumulated_sources = source_sections or []
         if source_warning:
             accumulated_source_warning = source_warning
+        if citation_warning:
+            accumulated_citation_warning = citation_warning
+        if citation_validation is not None:
+            accumulated_citation_validation = citation_validation
+        if source_scope is not None:
+            accumulated_source_scope = source_scope
 
-        final_sources_html = (
-            _build_sources_html(accumulated_sources, data_source, accumulated_source_warning)
-            if accumulated_sources
-            else ""
+        final_sources_html = _build_sources_html(
+            accumulated_sources,
+            data_source,
+            accumulated_source_warning,
+            accumulated_citation_warning,
+            accumulated_citation_validation,
+            accumulated_source_scope,
         )
 
         yield (

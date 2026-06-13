@@ -46,6 +46,16 @@ class SourceSection:
 
 
 @dataclass
+class SourceScopeInfo:
+    """Source id scopes for retrieval, prompt supply, and final summary citations."""
+
+    retrieved_source_ids: set[str] = field(default_factory=set)
+    supplied_source_ids: set[str] = field(default_factory=set)
+    cited_source_ids: set[str] = field(default_factory=set)
+    retrieval_strategy: str = ""
+
+
+@dataclass
 class SummaryResult:
     """Holds the three summary sections, metadata, and an optional error field."""
 
