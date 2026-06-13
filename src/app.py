@@ -17,7 +17,6 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from src.agent import SUPPORTED_ROLES, SummaryAgent
-from src.context_extractor import PatientContextExtractor
 from src.fhir_client import FHIRClient
 from src.models import SourceItem, SourceSection
 
@@ -42,11 +41,9 @@ _fhir_client = FHIRClient(
     password=os.environ.get("IRIS_PASSWORD", "SYS"),
     fallback_path=os.environ.get("FHIR_FALLBACK_PATH", "data"),
 )
-_extractor = PatientContextExtractor()
 _llm_client = OpenAI(api_key=_api_key)
 _agent = SummaryAgent(
     fhir_client=_fhir_client,
-    extractor=_extractor,
     llm_client=_llm_client,
 )
 

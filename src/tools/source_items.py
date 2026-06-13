@@ -7,37 +7,32 @@ from typing import Any
 from src.context_extractor import _date_only, _text
 from src.models import PatientResources, SourceItem, SourceSection
 
-SUPPORTED_SOURCE_RESOURCE_TYPES = (
-    "Patient",
-    "Condition",
-    "MedicationRequest",
-    "AllergyIntolerance",
-    "Observation",
-    "Encounter",
-    "CarePlan",
-)
+_SKIPPED_EVIDENCE_KEYS = {"extension"}
+_SOURCE_CONTEXT_MAX_CHARS = 24000
+_SOURCE_CONTEXT_MAX_VALUE_CHARS = 500
+_TRUNCATION_NOTICE = "[Context truncated due to source context budget.]"
 
 
 def build_source_sections(resources: PatientResources) -> list[SourceSection]:
     """Return source sections for the seven supported patient-scoped FHIR types."""
     counter = _SourceIdCounter()
     return [
-        _section("Patient (1)", [_patient_item(resources.patient, counter)]),
-        _section(
-            f"Conditions ({len(resources.conditions)})",
-            [_condition_item(resource, counter) for resource in resources.conditions],
+        SourceSection(label="Patient (1)", items=[_patient_item(resources.patient, counter)]),
+        SourceSection(
+            label=f"Conditions ({len(resources.conditions)})",
+            items=[_condition_item(resource, counter) for resource in resources.conditions],
         ),
-        _section(
-            f"Medication Requests ({len(resources.medications)})",
-            [_medication_item(resource, counter) for resource in resources.medications],
+        SourceSection(
+            label=f"Medication Requests ({len(resources.medications)})",
+            items=[_medication_item(resource, counter) for resource in resources.medications],
         ),
-        _section(
-            f"Allergies ({len(resources.allergies)})",
-            [_allergy_item(resource, counter) for resource in resources.allergies],
+        SourceSection(
+            label=f"Allergies ({len(resources.allergies)})",
+            items=[_allergy_item(resource, counter) for resource in resources.allergies],
         ),
-        _section(
-            f"Observations ({len(resources.observations)})",
-            [
+        SourceSection(
+            label=f"Observations ({len(resources.observations)})",
+            items=[
                 _observation_item(resource, counter)
                 for resource in sorted(
                     resources.observations,
@@ -46,9 +41,9 @@ def build_source_sections(resources: PatientResources) -> list[SourceSection]:
                 )
             ],
         ),
-        _section(
-            f"Encounters ({len(resources.encounters)})",
-            [
+        SourceSection(
+            label=f"Encounters ({len(resources.encounters)})",
+            items=[
                 _encounter_item(resource, counter)
                 for resource in sorted(
                     resources.encounters,
@@ -57,25 +52,68 @@ def build_source_sections(resources: PatientResources) -> list[SourceSection]:
                 )
             ],
         ),
-        _section(
-            f"Care Plans ({len(resources.care_plans)})",
-            [_care_plan_item(resource, counter) for resource in resources.care_plans],
+        SourceSection(
+            label=f"Care Plans ({len(resources.care_plans)})",
+            items=[_care_plan_item(resource, counter) for resource in resources.care_plans],
         ),
     ]
 
 
 def build_source_context(sections: list[SourceSection]) -> str:
-    """Return compact source-index context for the LLM."""
-    lines = ["=== Citeable FHIR Source Index ==="]
+    """Return source-indexed factual context for the LLM."""
+    lines = [
+        "=== Source-Indexed FHIR Context ===",
+        "Use only the source-indexed FHIR facts below.",
+        "Every factual claim based on these facts should cite one or more source ids.",
+        "Do not cite source ids that are not listed here.",
+        "",
+    ]
+    current_chars = sum(len(line) + 1 for line in lines)
+    truncated = False
+
     for section in sections:
         if not section.items:
             continue
-        lines.append(f"{section.label}:")
+        section_lines = [f"{section.label}:"]
+        section_chars = _lines_char_count(section_lines)
+        if current_chars + section_chars > _SOURCE_CONTEXT_MAX_CHARS:
+            truncated = True
+            break
+        lines.extend(section_lines)
+        current_chars += section_chars
+
         for item in section.items:
-            lines.append(
+            item_lines = [
                 f"[{item.source_id}] {item.resource_type}/{item.resource_id}: {item.summary}"
+            ]
+            item_lines.extend(
+                f"  {key}: {_format_evidence_value(value)}"
+                for key, value in item.evidence.items()
             )
+            item_chars = _lines_char_count(item_lines)
+            if current_chars + item_chars > _SOURCE_CONTEXT_MAX_CHARS:
+                truncated = True
+                break
+            lines.extend(item_lines)
+            current_chars += item_chars
+
+        if truncated:
+            break
+
+        blank_chars = 1
+        if current_chars + blank_chars > _SOURCE_CONTEXT_MAX_CHARS:
+            truncated = True
+            break
         lines.append("")
+        current_chars += blank_chars
+
+    if truncated:
+        notice_chars = len(_TRUNCATION_NOTICE) + 1
+        while lines and current_chars + notice_chars > _SOURCE_CONTEXT_MAX_CHARS:
+            removed = lines.pop()
+            current_chars -= len(removed) + 1
+        lines.append(_TRUNCATION_NOTICE)
+
     return "\n".join(lines).strip()
 
 
@@ -94,16 +132,11 @@ class _SourceIdCounter:
         return source_id
 
 
-def _section(label: str, items: list[SourceItem]) -> SourceSection:
-    return SourceSection(label=label, items=items)
-
-
 def _item(
     *,
     counter: _SourceIdCounter,
     resource: dict[str, Any],
     summary: str,
-    evidence: dict[str, Any],
 ) -> SourceItem:
     resource_type = str(resource.get("resourceType") or "Unknown")
     resource_id = str(resource.get("id") or "unknown")
@@ -115,13 +148,51 @@ def _item(
         resource_type=resource_type,
         resource_id=resource_id,
         summary=summary,
-        evidence={
-            "resourceType": resource_type,
-            "id": resource_id,
-            **{key: value for key, value in evidence.items() if value not in ("", None, [])},
-        },
+        evidence=_flatten_resource(resource),
         raw_resource=dict(resource),
     )
+
+
+def _flatten_resource(resource: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    _flatten_value(resource, "", result)
+    return result
+
+
+def _flatten_value(value: Any, path: str, result: dict[str, Any]) -> None:
+    if _is_empty_evidence_value(value):
+        return
+
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key in _SKIPPED_EVIDENCE_KEYS:
+                continue
+            child_path = f"{path}.{key}" if path else str(key)
+            _flatten_value(child, child_path, result)
+        return
+
+    if isinstance(value, list):
+        for index, child in enumerate(value):
+            _flatten_value(child, f"{path}[{index}]", result)
+        return
+
+    if path:
+        result[path] = value
+
+
+def _is_empty_evidence_value(value: Any) -> bool:
+    return value is None or value == "" or value == [] or value == {}
+
+
+def _format_evidence_value(value: Any) -> str:
+    text = str(value)
+    if len(text) <= _SOURCE_CONTEXT_MAX_VALUE_CHARS:
+        return text
+    return text[: _SOURCE_CONTEXT_MAX_VALUE_CHARS - 3] + "..."
+
+
+def _lines_char_count(lines: list[str]) -> int:
+    return sum(len(line) + 1 for line in lines)
 
 
 def _short_id(resource_id: str) -> str:
@@ -144,12 +215,6 @@ def _patient_item(patient: dict[str, Any], counter: _SourceIdCounter) -> SourceI
         counter=counter,
         resource=patient,
         summary="; ".join(parts),
-        evidence={
-            "name": name,
-            "birthDate": birth_date,
-            "gender": gender,
-            "deceased": deceased,
-        },
     )
 
 
@@ -157,7 +222,6 @@ def _condition_item(resource: dict[str, Any], counter: _SourceIdCounter) -> Sour
     code = _text(resource.get("code")) or "Unknown condition"
     onset = resource.get("onsetDateTime") or resource.get("onsetPeriod", {}).get("start", "")
     recorded = resource.get("recordedDate", "")
-    clinical = _text(resource.get("clinicalStatus"))
     summary_parts = [code]
     if onset:
         summary_parts.append(f"onset: {_date_only(onset) or onset}")
@@ -167,12 +231,6 @@ def _condition_item(resource: dict[str, Any], counter: _SourceIdCounter) -> Sour
         counter=counter,
         resource=resource,
         summary="; ".join(summary_parts),
-        evidence={
-            "code": code,
-            "clinicalStatus": clinical,
-            "onsetDateTime": onset,
-            "recordedDate": recorded,
-        },
     )
 
 
@@ -194,18 +252,11 @@ def _medication_item(resource: dict[str, Any], counter: _SourceIdCounter) -> Sou
         counter=counter,
         resource=resource,
         summary="; ".join(summary_parts),
-        evidence={
-            "medication": medication,
-            "status": status,
-            "authoredOn": authored,
-            "dosage": dosage,
-        },
     )
 
 
 def _allergy_item(resource: dict[str, Any], counter: _SourceIdCounter) -> SourceItem:
     substance = _text(resource.get("code")) or "Unknown allergy"
-    clinical = _text(resource.get("clinicalStatus"))
     criticality = resource.get("criticality", "")
     reaction = ""
     if resource.get("reaction"):
@@ -219,13 +270,6 @@ def _allergy_item(resource: dict[str, Any], counter: _SourceIdCounter) -> Source
         counter=counter,
         resource=resource,
         summary="; ".join(summary_parts),
-        evidence={
-            "code": substance,
-            "clinicalStatus": clinical,
-            "criticality": criticality,
-            "reaction": reaction,
-            "recordedDate": resource.get("recordedDate", ""),
-        },
     )
 
 
@@ -242,14 +286,6 @@ def _observation_item(resource: dict[str, Any], counter: _SourceIdCounter) -> So
         counter=counter,
         resource=resource,
         summary=summary,
-        evidence={
-            "code": code,
-            "value": value,
-            "unit": unit,
-            "effectiveDateTime": resource.get("effectiveDateTime", ""),
-            "issued": resource.get("issued", ""),
-            "interpretation": _text(resource.get("interpretation")),
-        },
     )
 
 
@@ -269,14 +305,6 @@ def _encounter_item(resource: dict[str, Any], counter: _SourceIdCounter) -> Sour
         counter=counter,
         resource=resource,
         summary="; ".join(summary_parts),
-        evidence={
-            "type": enc_type,
-            "status": status,
-            "class": _text(resource.get("class")),
-            "period.start": start,
-            "period.end": resource.get("period", {}).get("end", ""),
-            "reason": reason,
-        },
     )
 
 
@@ -296,13 +324,6 @@ def _care_plan_item(resource: dict[str, Any], counter: _SourceIdCounter) -> Sour
         counter=counter,
         resource=resource,
         summary="; ".join(summary_parts),
-        evidence={
-            "category": category,
-            "status": status,
-            "intent": intent,
-            "period.start": start,
-            "period.end": resource.get("period", {}).get("end", ""),
-        },
     )
 
 

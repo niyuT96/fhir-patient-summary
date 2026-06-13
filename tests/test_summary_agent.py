@@ -20,10 +20,10 @@ from src.agent import (
     _get_model_config,
     parse_sections,
 )
-from src.context_extractor import PatientContextExtractor
 from src.exceptions import FHIRClientError, FHIRUnavailableError
 from src.models import PatientResources, SummaryResult
 from src.tools.prompt_loader import get_role_prompt
+from src.tools.source_items import build_source_context
 
 ISO_8601_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
@@ -61,12 +61,6 @@ def _make_fhir_client(
     return client
 
 
-def _make_extractor() -> MagicMock:
-    extractor = MagicMock()
-    extractor.extract.return_value = "Patient context string"
-    return extractor
-
-
 def _stream_chunk(content: str):
     chunk = MagicMock()
     choice = MagicMock()
@@ -93,9 +87,8 @@ def _make_agent(
         patient_resources=patient_resources,
         side_effects=side_effects,
     )
-    extractor = _make_extractor()
     llm = _make_llm_stream(*stream_contents)
-    return SummaryAgent(fhir_client=fhir, extractor=extractor, llm_client=llm), fhir, extractor, llm
+    return SummaryAgent(fhir_client=fhir, llm_client=llm), fhir, llm
 
 
 class TestModelConfig:
@@ -104,7 +97,7 @@ class TestModelConfig:
         monkeypatch.delenv("OPENAI_TEMPERATURE", raising=False)
         monkeypatch.delenv("OPENAI_MAX_TOKENS", raising=False)
         monkeypatch.delenv("STREAM_THROTTLE_SECONDS", raising=False)
-        agent, _, _, llm = _make_agent()
+        agent, _, llm = _make_agent()
 
         list(agent.generate_summary_stream("patient-001", "ED Doctor"))
 
@@ -118,7 +111,7 @@ class TestModelConfig:
         monkeypatch.setenv("OPENAI_TEMPERATURE", "0.7")
         monkeypatch.setenv("OPENAI_MAX_TOKENS", "1234")
         monkeypatch.setenv("STREAM_THROTTLE_SECONDS", "0.05")
-        agent, _, _, llm = _make_agent()
+        agent, _, llm = _make_agent()
 
         list(agent.generate_summary_stream("patient-001", "ED Doctor"))
 
@@ -144,24 +137,22 @@ class TestModelConfig:
 
 class TestStreamingSummary:
     def test_unsupported_role_yields_error_without_fetch_or_llm_call(self):
-        agent, fhir, extractor, llm = _make_agent()
+        agent, fhir, llm = _make_agent()
 
         chunks = list(agent.generate_summary_stream("patient-001", "Radiologist"))
 
         assert chunks == [("**Error:** Unsupported role: Radiologist", [])]
         fhir.is_available.assert_not_called()
-        extractor.extract.assert_not_called()
         llm.chat.completions.create.assert_not_called()
 
     def test_patient_not_found_yields_error_without_llm_call(self):
-        agent, _, extractor, llm = _make_agent(patient_resources=[])
+        agent, _, llm = _make_agent(patient_resources=[])
 
         chunks = list(agent.generate_summary_stream("patient-999", "ED Doctor"))
 
         assert len(chunks) == 1
         assert chunks[0][0].startswith("**Error:**")
         assert "not found" in chunks[0][0]
-        extractor.extract.assert_not_called()
         llm.chat.completions.create.assert_not_called()
 
     def test_local_fallback_resources_are_filtered_to_selected_patient(self):
@@ -195,17 +186,14 @@ class TestStreamingSummary:
             selected_condition,
             other_condition,
         ]
-        extractor = _make_extractor()
-        extractor._format_condition.return_value = "- Selected condition"
         llm = _make_llm_stream("## Current Issues\n- Selected condition")
-        agent = SummaryAgent(fhir_client=fhir, extractor=extractor, llm_client=llm)
+        agent = SummaryAgent(fhir_client=fhir, llm_client=llm)
 
         chunks = list(agent.generate_summary_stream("p1", "ED Doctor"))
 
-        resources = extractor.extract.call_args.args[0]
-        assert isinstance(resources, PatientResources)
-        assert resources.patient == selected_patient
-        assert resources.conditions == [selected_condition]
+        source_sections = chunks[0][1]
+        assert source_sections[0].items[0].raw_resource == selected_patient
+        assert source_sections[1].items[0].raw_resource == selected_condition
         assert chunks[0][1][1].items[0].summary == "Selected condition"
         assert chunks[-1][0] == "## Current Issues\n- Selected condition"
 
@@ -225,18 +213,15 @@ class TestStreamingSummary:
         fhir = MagicMock()
         fhir.is_available.return_value = False
         fhir._load_fallback_bundle.return_value = [selected_patient, selected_condition]
-        extractor = _make_extractor()
         llm = _make_llm_stream("## Current Issues\n- Hypertension")
-        agent = SummaryAgent(fhir_client=fhir, extractor=extractor, llm_client=llm)
+        agent = SummaryAgent(fhir_client=fhir, llm_client=llm)
 
-        list(agent.generate_summary_stream(patient_id, "ED Doctor"))
+        chunks = list(agent.generate_summary_stream(patient_id, "ED Doctor"))
 
-        resources = extractor.extract.call_args.args[0]
-        assert isinstance(resources, PatientResources)
-        assert resources.conditions == [selected_condition]
+        assert chunks[0][1][1].items[0].raw_resource == selected_condition
 
     def test_source_sections_are_yielded_before_llm_markdown(self):
-        agent, _, _, _ = _make_agent(stream_contents=("A", "B"))
+        agent, _, _ = _make_agent(stream_contents=("A", "B"))
 
         chunks = list(agent.generate_summary_stream("patient-001", "ED Doctor"))
 
@@ -245,7 +230,7 @@ class TestStreamingSummary:
         assert chunks[1][0] == "A"
 
     def test_single_llm_stream_call_accumulates_markdown(self):
-        agent, _, _, llm = _make_agent(
+        agent, _, llm = _make_agent(
             stream_contents=("## Current", " Issues\n", "- BP high [S1]")
         )
 
@@ -254,7 +239,7 @@ class TestStreamingSummary:
         assert llm.chat.completions.create.call_count == 1
         call_kwargs = llm.chat.completions.create.call_args.kwargs
         assert call_kwargs["stream"] is True
-        assert "=== Citeable FHIR Source Index ===" in call_kwargs["messages"][1]["content"]
+        assert "=== Source-Indexed FHIR Context ===" in call_kwargs["messages"][1]["content"]
         assert chunks[-1][0] == "## Current Issues\n- BP high [S1]"
 
     def test_streaming_throttles_intermediate_yields_but_keeps_first_and_final(
@@ -264,7 +249,7 @@ class TestStreamingSummary:
         monkeypatch.setenv("STREAM_THROTTLE_SECONDS", "0.2")
         timestamps = iter([0.0, 0.0, 0.05, 0.19, 0.21])
         monkeypatch.setattr("src.agent.time.monotonic", lambda: next(timestamps))
-        agent, _, _, _ = _make_agent(stream_contents=("A", "B", "C", "D"))
+        agent, _, _ = _make_agent(stream_contents=("A", "B", "C", "D"))
 
         chunks = list(agent.generate_summary_stream("patient-001", "ED Doctor"))
         markdown_chunks = [chunk[0] for chunk in chunks[1:]]
@@ -276,7 +261,7 @@ class TestStreamingSummary:
         assert len(markdown_chunks) < 4
 
     def test_streaming_call_uses_system_and_user_messages(self):
-        agent, _, _, llm = _make_agent()
+        agent, _, llm = _make_agent()
 
         list(agent.generate_summary_stream("patient-001", "Care Manager"))
 
@@ -285,14 +270,13 @@ class TestStreamingSummary:
         assert messages[0]["role"] == "system"
         assert messages[1]["role"] == "user"
         assert messages[0]["content"] == get_role_prompt("Care Manager")
-        assert "FHIR patient context:" in messages[1]["content"]
+        assert "FHIR source-indexed context:" in messages[1]["content"]
 
     def test_llm_stream_exception_yields_error(self):
         fhir = _make_fhir_client()
-        extractor = _make_extractor()
         llm = MagicMock()
         llm.chat.completions.create.side_effect = Exception("Rate limit exceeded")
-        agent = SummaryAgent(fhir_client=fhir, extractor=extractor, llm_client=llm)
+        agent = SummaryAgent(fhir_client=fhir, llm_client=llm)
 
         chunks = list(agent.generate_summary_stream("patient-001", "ED Doctor"))
 
@@ -300,7 +284,7 @@ class TestStreamingSummary:
         assert chunks[-1] == ("**Error:** Rate limit exceeded", [])
 
     def test_no_generate_summary_non_streaming_api(self):
-        agent, _, _, _ = _make_agent()
+        agent, _, _ = _make_agent()
 
         assert not hasattr(agent, "generate_summary")
 
@@ -375,10 +359,7 @@ class TestFetchAllFhirResources:
 
 class TestSourceSections:
     def test_source_sections_are_structured_and_unlimited(self):
-        fhir = _make_fhir_client()
-        extractor = PatientContextExtractor()
-        llm = _make_llm_stream("unused")
-        agent = SummaryAgent(fhir_client=fhir, extractor=extractor, llm_client=llm)
+        agent, _, _ = _make_agent()
         resources = PatientResources(
             patient=MINIMAL_PATIENT,
             conditions=[
@@ -396,8 +377,64 @@ class TestSourceSections:
         assert [item.summary for item in condition_section.items] == ["A", "B", "C", "D"]
         assert condition_section.items[0].source_id == "S2"
         assert condition_section.items[0].resource_type == "Condition"
-        assert condition_section.items[0].evidence["code"] == "A"
+        assert condition_section.items[0].evidence["code.text"] == "A"
         assert condition_section.hidden_items == []
+
+    def test_source_item_evidence_is_flattened_from_full_resource(self):
+        agent, _, _ = _make_agent()
+        resources = PatientResources(
+            patient=MINIMAL_PATIENT,
+            observations=[
+                {
+                    "resourceType": "Observation",
+                    "id": "obs-1",
+                    "code": {"text": "Blood pressure"},
+                    "component": [
+                        {
+                            "code": {"text": "Systolic Blood Pressure"},
+                            "valueQuantity": {"value": 120, "unit": "mmHg"},
+                        }
+                    ],
+                    "extension": [{"url": "ignored"}],
+                    "valueString": "",
+                    "meta": {"versionId": "1"},
+                }
+            ],
+        )
+
+        item = agent._build_source_sections(resources)[4].items[0]
+
+        assert item.evidence["resourceType"] == "Observation"
+        assert item.evidence["id"] == "obs-1"
+        assert item.evidence["code.text"] == "Blood pressure"
+        assert item.evidence["component[0].code.text"] == "Systolic Blood Pressure"
+        assert item.evidence["component[0].valueQuantity.value"] == 120
+        assert item.evidence["meta.versionId"] == "1"
+        assert "extension[0].url" not in item.evidence
+        assert "valueString" not in item.evidence
+        assert "code" not in item.evidence
+
+    def test_source_context_includes_source_ids_and_evidence_paths(self):
+        agent, _, _ = _make_agent()
+        sections = agent._build_source_sections(
+            PatientResources(
+                patient=MINIMAL_PATIENT,
+                conditions=[
+                    {
+                        "resourceType": "Condition",
+                        "id": "c1",
+                        "code": {"text": "Hypertension"},
+                    }
+                ],
+            )
+        )
+
+        context = build_source_context(sections)
+
+        assert context.startswith("=== Source-Indexed FHIR Context ===")
+        assert "[S1] Patient/patient-001: Jane Doe; DOB: 1970-01-01; gender: female" in context
+        assert "[S2] Condition/c1: Hypertension" in context
+        assert "  code.text: Hypertension" in context
 
 
 class TestParseSectionsCompatibility:

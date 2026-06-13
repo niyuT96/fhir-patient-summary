@@ -11,7 +11,6 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
-
 from src.exceptions import FHIRClientError, FHIRUnavailableError
 from src.models import PatientResources, SourceSection, SummaryResult
 from src.tools.citation_repair import repair_summary_citations
@@ -20,7 +19,6 @@ from src.tools.prompt_loader import get_role_prompt, get_supported_roles
 from src.tools.source_items import build_source_context, build_source_sections
 
 if TYPE_CHECKING:
-    from src.context_extractor import PatientContextExtractor
     from src.fhir_client import FHIRClient
 
 logger = logging.getLogger(__name__)
@@ -252,14 +250,10 @@ class SummaryAgent:
     def __init__(
         self,
         fhir_client: "FHIRClient",
-        extractor: "PatientContextExtractor",
         llm_client,  # openai.OpenAI instance, typed loosely to avoid a hard dependency
     ) -> None:
         self._fhir = fhir_client
-        self._fhir_client = fhir_client  # alias for test compatibility
-        self._extractor = extractor
         self._llm = llm_client
-        self._llm_client = llm_client  # alias for test compatibility
 
     # ---------------------------------------------------------------------- #
     # Private helpers                                                         #
@@ -331,20 +325,6 @@ class SummaryAgent:
 
         return False
 
-    @staticmethod
-    def _extract_patient_name(patient: dict) -> str:
-        """Extract a display name from a FHIR Patient resource dict."""
-        names = patient.get("name", [])
-        if not names:
-            return "Unknown"
-        first = names[0]
-        if first.get("text"):
-            return first["text"]
-        given = " ".join(first.get("given", []))
-        family = first.get("family", "")
-        parts = [p for p in [given, family] if p]
-        return " ".join(parts) if parts else "Unknown"
-
     # ---------------------------------------------------------------------- #
     # Source-section builder                                                  #
     # ---------------------------------------------------------------------- #
@@ -372,14 +352,12 @@ class SummaryAgent:
         # --- Data fetch (same logic as generate_summary) ---
         try:
             if self._fhir.is_available():
-                data_source = "fhir_server"
                 fetch_result = _fetch_all_fhir_resources(self._fhir, patient_id)
                 if isinstance(fetch_result, SummaryResult):
                     yield f"**Error:** {fetch_result.error}", []
                     return
                 resources: PatientResources = fetch_result
             else:
-                data_source = "local_fallback"
                 resources = self._load_fallback_resources(patient_id)
                 if isinstance(resources, SummaryResult):
                     yield f"**Error:** {resources.error}", []
@@ -390,7 +368,6 @@ class SummaryAgent:
             return
 
         source_sections = self._build_source_sections(resources)
-        context_text = self._extractor.extract(resources)
         source_context = build_source_context(source_sections)
         system_prompt = get_role_prompt(role)
 
@@ -406,8 +383,7 @@ class SummaryAgent:
                     {
                         "role": "user",
                         "content": (
-                            "FHIR patient context:\n"
-                            f"{context_text}\n\n"
+                            "FHIR source-indexed context:\n"
                             f"{source_context}"
                         ),
                     },
